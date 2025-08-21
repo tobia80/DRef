@@ -1,6 +1,6 @@
 # CRef
 
-Cluster Ref (CRef) is a distributed variable implementation designed to synchronize state across multiple nodes in a cluster. It provides a simple and robust abstraction for managing shared, mutable state in distributed systems.
+Cluster Ref (CRef) is a distributed variable implementation designed to synchronize state across multiple nodes in a cluster. It provides a simple and robust abstraction for managing shared, mutable state in distributed systems. One abstraction that has also been implemented are Locks and pub sub patterns,
 
 ## Features
 - Distributed, strongly-consistent reference (Ref) abstraction
