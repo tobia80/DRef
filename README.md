@@ -7,15 +7,12 @@ Cluster Ref (CRef) is a distributed variable implementation designed to synchron
 - Synchronizes state across cluster nodes
 - Fault-tolerant and resilient to node failures
 - Simple API for updating and reading shared state
-- Pluggable backend (e.g., Redis, in-memory, etc.)
+- Pluggable backend (e.g., Redis, in-memory, Raft (soon) etc.)
 - Integration with modern Scala concurrency libraries (e.g., ZIO)
 
 ## Getting Started
 
-Add CRef to your project dependencies (SBT example):
-```scala
-libraryDependencies += "com.yourorg" %% "cref" % "<version>"
-```
+Add CRef to your project dependencies
 
 ## Usage Example
 
