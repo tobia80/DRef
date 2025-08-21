@@ -1,13 +1,15 @@
 # CRef
 
-Cluster Ref (CRef) is a distributed variable implementation designed to synchronize state across multiple nodes in a cluster. It provides a simple and robust abstraction for managing shared, mutable state in distributed systems. One abstraction that has also been implemented are Locks and pub sub patterns,
+Cluster Ref (CRef) is a distributed variable implementation designed to synchronize state across multiple nodes in a cluster. It provides a simple and robust abstraction for managing shared, mutable state in distributed systems. In addition to distributed references, CRef also implements distributed locks and pub/sub patterns for advanced coordination and messaging.
 
 ## Features
 - Distributed, strongly-consistent reference (Ref) abstraction
+- Distributed locks for mutual exclusion across nodes
+- Pub/Sub pattern for event-driven communication
 - Synchronizes state across cluster nodes
 - Fault-tolerant and resilient to node failures
 - Simple API for updating and reading shared state
-- Pluggable backend (e.g., Redis, in-memory, Raft (soon) etc.)
+- Pluggable backend (e.g., Redis, in-memory, Raft (soon), etc.)
 - Integration with modern Scala concurrency libraries (e.g., ZIO)
 
 ## Getting Started
@@ -31,6 +33,36 @@ object Example extends ZIOAppDefault {
   } yield ()
 }
 ```
+
+## Distributed Locks Example
+
+CRef provides distributed locks to ensure mutual exclusion across fibers or nodes. Here is an example inspired by the test suite:
+
+```scala
+import cref.CRef
+import zio._
+
+object LockExample extends ZIOAppDefault {
+  override def run = for {
+    list  <- Ref.make(List.empty[Int])
+    fiber <- ZIO.foreachParDiscard(List(100, 200)) { id =>
+      (Console.printLine(s"Starting $id") *>
+        CRef.lock() {
+          Console.printLine(s"Executing $id") *>
+          list.update(_ :+ id) *>
+          ZIO.sleep(1.second)
+        }).delay(id.millis)
+    }.fork
+    _     <- ZIO.sleep(500.millis)
+    valueWithOneLock <- list.get
+    _     <- fiber.join
+    valueWithTwoLocks <- list.get
+    _     <- Console.printLine(s"After 500ms: $valueWithOneLock, after all: $valueWithTwoLocks")
+  } yield ()
+}
+```
+
+This example shows two concurrent tasks attempting to acquire the same lock. The lock ensures that only one task executes its critical section at a time, even in a distributed environment.
 
 ## Testing
 
