@@ -1,4 +1,4 @@
-package zio.cref
+package io.github.tobia80.cref
 
 import io.github.vigoo.desert.*
 import io.github.vigoo.desert.zioschema.DerivedBinaryCodec

@@ -4,6 +4,10 @@ ThisBuild / version := "0.2.1"
 
 ThisBuild / scalaVersion := "3.5.2"
 
+ThisBuild / organization         := "io.github.tobia80"
+ThisBuild / organizationName     := "tobia80"
+ThisBuild / organizationHomepage := Some(url("https://tobia80.github.io"))
+
 lazy val root = (project in file("."))
   .settings(
     name := "Cref",

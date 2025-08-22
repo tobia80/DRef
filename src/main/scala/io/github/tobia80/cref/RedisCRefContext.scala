@@ -1,4 +1,4 @@
-package zio.cref
+package io.github.tobia80.cref
 
 import dev.profunktor.redis4cats.connection.RedisClient
 import dev.profunktor.redis4cats.data.{RedisChannel, RedisCodec}
