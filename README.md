@@ -2,6 +2,9 @@
 
 Cluster Ref (CRef) is a distributed variable implementation designed to synchronize state across multiple nodes in a cluster. It provides a simple and robust abstraction for managing shared, mutable state in distributed systems. In addition to distributed references, CRef also implements distributed locks and pub/sub patterns for advanced coordination and messaging.
 
+## Use cases
+It can be used to implement simple leader election, shard management, locks and everything that needs coordination across nodes.
+
 ## Features
 - Distributed, strongly-consistent reference (Ref) abstraction
 - Distributed locks for mutual exclusion across nodes
@@ -33,6 +36,7 @@ object Example extends ZIOAppDefault {
   } yield ()
 }
 ```
+CRef takes an id to uniquely identify the reference across the cluster. The default provider is Auto that generates automatically an id based on the source code location. If you see weird behaviours, it could be safer to use ManualId setting a unique reference across nodes.
 
 ## Distributed Locks Example
 
