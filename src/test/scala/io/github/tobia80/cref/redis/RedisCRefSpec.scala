@@ -1,6 +1,8 @@
-package io.github.tobia80.cref
+package io.github.tobia80.cref.redis
 
-import CRef.*
+import io.github.tobia80.cref.CRef.*
+import io.github.tobia80.cref.CRef
+import io.github.tobia80.cref.redis.{RedisCRefContext, RedisConfig}
 import zio.*
 import zio.test.{assertTrue, Spec, TestAspect, TestClock, TestEnvironment, ZIOSpecDefault}
 
@@ -17,7 +19,8 @@ object RedisCRefSpec extends ZIOSpecDefault {
     test("should be able to listen for changes") {
       for {
         aRef          <- CRef.make("hi")
-        elementsFiber <- aRef.changeStream.interruptAfter(1.seconds).runCollect.fork
+        _             <- ZIO.sleep(50.millis) // wait few milliseconds to ensure the change is not caught
+        elementsFiber <- aRef.changeStream.interruptAfter(2.seconds).runCollect.forkScoped
         _             <- aRef.set("hello")
         _             <- aRef.set("changed again")
         mutations     <- elementsFiber.join

@@ -1,7 +1,7 @@
 package io.github.tobia80.cref
 
 import CRef.*
-import RedisCRefSpec.test
+import io.github.tobia80.cref.redis.RedisCRefSpec.test
 import zio.test.{assertTrue, Spec, TestAspect, TestClock, TestEnvironment, ZIOSpecDefault}
 import zio.{durationInt, Ref, Scope, ZIO}
 

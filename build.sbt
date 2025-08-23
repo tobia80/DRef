@@ -12,15 +12,14 @@ lazy val root = (project in file("."))
   .settings(
     name := "Cref",
     libraryDependencies ++= Seq(
-      "dev.zio"         %% "zio"                % "2.1.20",
-      "io.github.vigoo" %% "desert-zio"         % "0.3.6",
-      "io.github.vigoo" %% "desert-zio-schema"  % "0.3.6",
-      "dev.profunktor"  %% "redis4cats-effects" % "1.7.2",
-      "dev.profunktor"  %% "redis4cats-streams" % "1.7.2",
-      "dev.zio"         %% "zio-interop-cats"   % "23.1.0.5",
+      "dev.zio"         %% "zio"                         % "2.1.20",
+      "dev.zio"         %% "zio-interop-reactivestreams" % "2.0.2",
+      "io.github.vigoo" %% "desert-zio"                  % "0.3.6",
+      "io.github.vigoo" %% "desert-zio-schema"           % "0.3.6",
+      "io.lettuce"       % "lettuce-core"                % "6.8.0.RELEASE",
       // test
-      "dev.zio"         %% "zio-test"           % "2.1.20" % Test,
-      "dev.zio"         %% "zio-test-sbt"       % "2.1.20" % Test
+      "dev.zio"         %% "zio-test"                    % "2.1.20" % Test,
+      "dev.zio"         %% "zio-test-sbt"                % "2.1.20" % Test
     ),
     testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework")
   )

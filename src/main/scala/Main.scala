@@ -1,6 +1,7 @@
 import io.github.tobia80.cref.CRef.*
 import io.github.tobia80.cref.CRef.auto.*
-import io.github.tobia80.cref.{CRef, CRefContext, RedisCRefContext, RedisConfig}
+import io.github.tobia80.cref.redis.{RedisCRefContext, RedisConfig}
+import io.github.tobia80.cref.{CRef, CRefContext}
 import zio.{Console, ZIO, ZIOAppDefault, ZLayer, *}
 
 object Main extends ZIOAppDefault {
