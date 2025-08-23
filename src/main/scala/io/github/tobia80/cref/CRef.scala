@@ -6,7 +6,7 @@ import zio.ZIO.fromEither
 import zio.internal.stacktracer.Tracer.*
 import zio.schema.{DeriveSchema, Schema}
 import zio.stream.ZStream
-import zio.{Promise, Queue, RIO, Random, Ref, Schedule, Task, Trace, ULayer, ZIO, ZLayer}
+import zio.{Promise, Queue, RIO, Random, Ref, Schedule, Task, Trace, UIO, ULayer, ZIO, ZLayer}
 
 import scala.deriving.Mirror
 
@@ -22,6 +22,19 @@ trait CRef[T] {
 
   def changeStream: ZStream[CRefContext, Throwable, T]
 
+  def modify[B](f: T => (B, T)): RIO[CRefContext, B]
+
+  def getAndUpdate(f: T => T): RIO[CRefContext, T] =
+    modify(v => (v, f(v)))
+
+  def update(f: T => T): RIO[CRefContext, Unit] =
+    modify(v => ((), f(v)))
+
+  def updateAndGet(f: T => T): RIO[CRefContext, T] =
+    modify { v =>
+      val result = f(v)
+      (result, result)
+    }
 }
 
 trait CRefContext {
@@ -191,5 +204,14 @@ class CRefImpl[T: BinaryCodec](context: CRefContext)(name: String) extends CRef[
     fromEither(serializeToArray(a))
       .mapError(failure => new Throwable(failure.message))
       .flatMap(context.setElementIfNotExist(name, _))
+
+  override def modify[B](f: T => (B, T)): RIO[CRefContext, B] =
+    CRef.lock(ManualId(s"lock:$name")) {
+      for {
+        current      <- get
+        (b, newValue) = f(current)
+        _            <- set(newValue)
+      } yield b
+    }
 
 }
