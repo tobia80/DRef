@@ -30,7 +30,7 @@ object Example extends ZIOAppDefault {
     cref <- CRef.make[Int](0) // Create a distributed ref with initial value 0
     _    <- cref.update(_ + 1) // Atomically increment the value
     v    <- cref.get           // Read the current value
-    _    <- Console.printLine(s"Current value: $v")
+    _    <- ZIO.logInfo(s"Current value: $v")
   } yield ()
 }
 ```
@@ -50,7 +50,7 @@ object LockExample extends ZIOAppDefault {
     fiber <- ZIO.foreachParDiscard(List(100, 200)) { id =>
       (Console.printLine(s"Starting $id") *>
         CRef.lock() {
-          Console.printLine(s"Executing $id") *>
+          ZIO.logInfo(s"Executing $id") *>
           list.update(_ :+ id) *>
           ZIO.sleep(1.second)
         }).delay(id.millis)
@@ -59,7 +59,7 @@ object LockExample extends ZIOAppDefault {
     valueWithOneLock <- list.get
     _     <- fiber.join
     valueWithTwoLocks <- list.get
-    _     <- Console.printLine(s"After 500ms: $valueWithOneLock, after all: $valueWithTwoLocks")
+    _     <- ZIO.logInfo(s"After 500ms: $valueWithOneLock, after all: $valueWithTwoLocks")
   } yield ()
 }
 ```
