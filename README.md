@@ -10,10 +10,8 @@ It can be used to implement simple leader election, shard management, locks and 
 - Distributed locks for mutual exclusion across nodes
 - Pub/Sub pattern for event-driven communication
 - Synchronizes state across cluster nodes
-- Fault-tolerant and resilient to node failures
 - Simple API for updating and reading shared state
 - Pluggable backend (e.g., Redis, in-memory, Raft (soon), etc.)
-- Integration with modern Scala concurrency libraries (e.g., ZIO)
 
 ## Getting Started
 
