@@ -48,7 +48,7 @@ object LockExample extends ZIOAppDefault {
   override def run = for {
     list  <- Ref.make(List.empty[Int])
     fiber <- ZIO.foreachParDiscard(List(100, 200)) { id =>
-      (Console.printLine(s"Starting $id") *>
+      (ZIO.logInfo(s"Starting $id") *>
         CRef.lock() {
           ZIO.logInfo(s"Executing $id") *>
           list.update(_ :+ id) *>
