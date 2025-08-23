@@ -1,10 +1,11 @@
-package zio.cref
+package io.github.tobia80.cref
 
 import CRef.*
-import zio.*
+import io.github.tobia80.cref.redis.RedisCRefSpec.test
 import zio.test.{assertTrue, Spec, TestAspect, TestClock, TestEnvironment, ZIOSpecDefault}
+import zio.{durationInt, Ref, Scope, ZIO}
 
-object RedisCRefSpec extends ZIOSpecDefault {
+object CRefSpec extends ZIOSpecDefault {
 
   override def spec: Spec[TestEnvironment & Scope, Any] = suite("CRef")(
     test("should be able to create a CRef") {
@@ -17,12 +18,13 @@ object RedisCRefSpec extends ZIOSpecDefault {
     test("should be able to listen for changes") {
       for {
         aRef          <- CRef.make("hi")
-        elementsFiber <- aRef.changeStream.interruptAfter(1.seconds).runCollect.fork
+        elementsFiber <- aRef.changeStream.interruptAfter(2.seconds).runCollect.fork
         _             <- aRef.set("hello")
         _             <- aRef.set("changed again")
+        _             <- TestClock.adjust(2.seconds)
         mutations     <- elementsFiber.join
-      } yield assertTrue(mutations == Chunk("hello", "changed again"))
-    } @@ TestAspect.withLiveClock,
+      } yield assertTrue(mutations == List("hello", "changed again"))
+    },
     test("locks should work") { // two fibers trying to lock the same resource, waiting 1 seconds, queue is written and sleep, when 2 seconds pass, queue is 2 elements
       for {
         list              <- Ref.make[List[Int]](Nil)
@@ -42,19 +44,5 @@ object RedisCRefSpec extends ZIOSpecDefault {
         valueWithTwoLocks <- list.get
       } yield assertTrue(valueWithOneLock == List(100) && valueWithTwoLocks == List(100, 200))
     } @@ TestAspect.withLiveClock
-  ).provide(
-    RedisCRefContext.live,
-    Scope.default,
-    ZLayer.succeed(
-      RedisConfig(
-        host = "localhost",
-        port = 6379,
-        database = 0,
-        username = None,
-        password = None,
-        caCert = None,
-        ttl = Some(5.seconds.asFiniteDuration)
-      )
-    )
-  )
+  ).provide(CRefContext.local)
 }

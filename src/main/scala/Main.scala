@@ -1,6 +1,7 @@
-import zio.cref.CRef.*
-import zio.cref.CRef.auto.*
-import zio.cref.{CRef, CRefContext, RedisCRefContext, RedisConfig}
+import io.github.tobia80.cref.CRef.*
+import io.github.tobia80.cref.CRef.auto.*
+import io.github.tobia80.cref.redis.{RedisCRefContext, RedisConfig}
+import io.github.tobia80.cref.{CRef, CRefContext}
 import zio.{Console, ZIO, ZIOAppDefault, ZLayer, *}
 
 object Main extends ZIOAppDefault {
@@ -41,7 +42,7 @@ object Main extends ZIOAppDefault {
       .provide(
         RedisCRefContext.live,
         ZLayer.succeed(
-          RedisConfig("giulionatta.duckdns.org", 6379, 0, None, None, None, Some(50.minutes.asFiniteDuration))
+          RedisConfig("host", 6379, 0, None, None, None, Some(50.minutes.asFiniteDuration))
         ),
         Scope.default
       )

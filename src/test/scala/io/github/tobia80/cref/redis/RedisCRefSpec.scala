@@ -1,11 +1,12 @@
-package zio.cref
+package io.github.tobia80.cref.redis
 
-import CRef.*
-import RedisCRefSpec.test
+import io.github.tobia80.cref.CRef.*
+import io.github.tobia80.cref.CRef
+import io.github.tobia80.cref.redis.{RedisCRefContext, RedisConfig}
+import zio.*
 import zio.test.{assertTrue, Spec, TestAspect, TestClock, TestEnvironment, ZIOSpecDefault}
-import zio.{durationInt, Ref, Scope, ZIO}
 
-object CRefSpec extends ZIOSpecDefault {
+object RedisCRefSpec extends ZIOSpecDefault {
 
   override def spec: Spec[TestEnvironment & Scope, Any] = suite("CRef")(
     test("should be able to create a CRef") {
@@ -18,13 +19,13 @@ object CRefSpec extends ZIOSpecDefault {
     test("should be able to listen for changes") {
       for {
         aRef          <- CRef.make("hi")
-        elementsFiber <- aRef.changeStream.interruptAfter(2.seconds).runCollect.fork
+        _             <- ZIO.sleep(50.millis) // wait few milliseconds to ensure the change is not caught
+        elementsFiber <- aRef.changeStream.interruptAfter(2.seconds).runCollect.forkScoped
         _             <- aRef.set("hello")
         _             <- aRef.set("changed again")
-        _             <- TestClock.adjust(2.seconds)
         mutations     <- elementsFiber.join
-      } yield assertTrue(mutations == List("hello", "changed again"))
-    },
+      } yield assertTrue(mutations == Chunk("hello", "changed again"))
+    } @@ TestAspect.withLiveClock,
     test("locks should work") { // two fibers trying to lock the same resource, waiting 1 seconds, queue is written and sleep, when 2 seconds pass, queue is 2 elements
       for {
         list              <- Ref.make[List[Int]](Nil)
@@ -44,5 +45,19 @@ object CRefSpec extends ZIOSpecDefault {
         valueWithTwoLocks <- list.get
       } yield assertTrue(valueWithOneLock == List(100) && valueWithTwoLocks == List(100, 200))
     } @@ TestAspect.withLiveClock
-  ).provide(CRefContext.local)
+  ).provide(
+    RedisCRefContext.live,
+    Scope.default,
+    ZLayer.succeed(
+      RedisConfig(
+        host = "localhost",
+        port = 6379,
+        database = 0,
+        username = None,
+        password = None,
+        caCert = None,
+        ttl = Some(5.seconds.asFiniteDuration)
+      )
+    )
+  )
 }
