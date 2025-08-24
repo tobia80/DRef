@@ -7,7 +7,7 @@ import zio.{durationInt, Ref, Scope, ZIO}
 
 object CRefSpec extends ZIOSpecDefault {
 
-  override def spec: Spec[TestEnvironment & Scope, Any] = suite("CRef")(
+  override def spec: Spec[TestEnvironment & Scope, Any] = suite("CRef memory")(
     test("should be able to create a CRef") {
       for {
         aRef  <- CRef.make("hi")

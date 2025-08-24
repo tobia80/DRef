@@ -36,6 +36,25 @@ object Example extends ZIOAppDefault {
 ```
 CRef takes an id to uniquely identify the reference across the cluster. The default provider is Auto that generates automatically an id based on the source code location. If you see weird behaviours, it could be safer to use ManualId setting a unique reference across nodes.
 
+## Leader election example
+CRef can be used to implement leader election in a distributed system. Here is an example:
+
+```scala
+
+import cref.CRef
+import cref.CRef.*
+import zio._
+
+object Example extends ZIOAppDefault {
+  override def run = for {
+    leadershipInfo <- CRef.make[LeadershipInfo](LeadershipInfo(info = None))
+    _    <- leadershipInfo.getAndUpdateZIO{ info =>
+      if (!info.leaderElected) setAsLeader(info) <* ZIO.logInfo("I am the leader")
+      else ZIO.logInfo(s"Leader already elected: ${info.info}") *> ZIO.succeed(info)
+    }
+  } yield ()
+}
+```
 ## Distributed Locks Example
 
 CRef provides distributed locks to ensure mutual exclusion across fibers or nodes. Here is an example inspired by the test suite:

@@ -24,6 +24,8 @@ trait CRef[T] {
 
   def modify[B](f: T => (B, T)): RIO[CRefContext, B]
 
+  def modifyZIO[B, C](f: T => RIO[C, (B, T)]): RIO[CRefContext & C, B]
+
   def getAndUpdate(f: T => T): RIO[CRefContext, T] =
     modify(v => (v, f(v)))
 
@@ -35,6 +37,28 @@ trait CRef[T] {
       val result = f(v)
       (result, result)
     }
+
+  def getAndUpdateZIO[C](f: T => RIO[C, T]): RIO[CRefContext & C, T] =
+    modifyZIO { v =>
+      for {
+        result <- f(v)
+      } yield (v, result)
+    }
+
+  def updateZIO[C](f: T => RIO[C, T]): RIO[CRefContext & C, Unit] =
+    modifyZIO { v =>
+      for {
+        result <- f(v)
+      } yield ((), result)
+    }
+
+  def updateAndGetZIO[C](f: T => RIO[C, T]): RIO[CRefContext & C, T] =
+    modifyZIO { v =>
+      for {
+        result <- f(v)
+      } yield (result, result)
+    }
+
 }
 
 trait CRefContext {
@@ -85,7 +109,7 @@ object CRefContext {
         if !contains then true -> el.updated(name, value)
         else false             -> el
       }
-      .tap(result => changes.offer(SetElement(name, value)))
+      .tap(result => changes.offer(SetElement(name, value)).when(result))
 
     override def deleteElement(name: String): Task[Unit] = ref.update { el =>
       el.removed(name)
@@ -168,7 +192,7 @@ object CRef {
                      case AutoId       => s"$location:$file:$line ($hash)"
                      case ManualId(id) => id
                    }
-      _         <- context.setElement(name, bytes)
+      _         <- context.setElementIfNotExist(name, bytes)
     } yield new CRefImpl[T](context)(name)
 }
 
@@ -211,6 +235,15 @@ class CRefImpl[T: BinaryCodec](context: CRefContext)(name: String) extends CRef[
         current      <- get
         (b, newValue) = f(current)
         _            <- set(newValue)
+      } yield b
+    }
+
+  override def modifyZIO[B, C](f: T => RIO[C, (B, T)]): RIO[CRefContext & C, B] =
+    CRef.lock(ManualId(s"lock:$name")) {
+      for {
+        current       <- get
+        (b, newValue) <- f(current)
+        _             <- set(newValue)
       } yield b
     }
 

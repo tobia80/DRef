@@ -8,7 +8,7 @@ import zio.test.{assertTrue, Spec, TestAspect, TestClock, TestEnvironment, ZIOSp
 
 object RedisCRefSpec extends ZIOSpecDefault {
 
-  override def spec: Spec[TestEnvironment & Scope, Any] = suite("CRef")(
+  override def spec: Spec[TestEnvironment & Scope, Any] = suite("CRef Redis")(
     test("should be able to create a CRef") {
       for {
         aRef  <- CRef.make("hi")
