@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package io.github.tobia80;
+
+
+message EndpointResponse {
+  repeated string ids = 1;
+}
+
+message GetEndpointsRequest {
+}
+
+message SetElementRequest {
+  string id = 1;
+  string name = 2;
+  bytes value = 3;
+}
+message SetElementResponse {}
+message SetElementIfNotExistRequest {
+  string id = 1;
+  string name = 2;
+  bytes value = 3;
+}
+message SetElementIfNotExistResponse {
+  bool created = 1;
+}
+message GetElementRequest {
+  string id = 1;
+  string name = 2;
+}
+message GetElementResponse {
+  optional bytes value = 1;
+}
+message DeleteElementRequest {
+  string id = 1;
+  string name = 2;
+}
+message DeleteElementResponse {}
+
+
+
+
+message SendCommandRequest {
+  string id = 1;
+  bytes payload = 2;
+}
+
+message SendCommandResponse {
+}
+
+message SubscribeEventsRequest {
+
+}
+
+message Event {
+  string id = 1;
+}
+
+
+service CRefRaft {
+
+  rpc SetElement(SetElementRequest) returns (SetElementResponse) {}
+  rpc SetElementIfNotExist(SetElementIfNotExistRequest) returns (SetElementIfNotExistResponse) {}
+  rpc GetElement(GetElementRequest) returns (GetElementResponse) {}
+  rpc DeleteElement(DeleteElementRequest) returns (DeleteElementResponse) {}
+
+  rpc GetEndpoints(GetEndpointsRequest) returns (EndpointResponse) {}
+
+  rpc SendCommand(SendCommandRequest) returns (SendCommandResponse) {}
+
+  rpc SubscribeEvents(SubscribeEventsRequest) returns (stream Event) {}
+}

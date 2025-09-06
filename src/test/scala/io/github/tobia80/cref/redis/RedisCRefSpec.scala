@@ -1,10 +1,9 @@
 package io.github.tobia80.cref.redis
 
-import io.github.tobia80.cref.CRef.*
 import io.github.tobia80.cref.CRef
-import io.github.tobia80.cref.redis.{RedisCRefContext, RedisConfig}
+import io.github.tobia80.cref.CRef.*
 import zio.*
-import zio.test.{assertTrue, Spec, TestAspect, TestClock, TestEnvironment, ZIOSpecDefault}
+import zio.test.{assertTrue, Spec, TestAspect, TestEnvironment, ZIOSpecDefault}
 
 object RedisCRefSpec extends ZIOSpecDefault {
 

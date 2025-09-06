@@ -172,9 +172,13 @@ object CRef {
                                 }
                                 .runDrain
                                 .unless(gainedLock)
-      result               <- f
-      _                    <- aliveInterruptStream.succeed(())
-      _                    <- context.deleteElement(name)
+      result               <- f.ensuring {
+                                aliveInterruptStream.succeed(()) *>
+                                  context
+                                    .deleteElement(name)
+                                    .tapError(err => ZIO.logError(s"Error releasing lock $name: ${err.getMessage}"))
+                                    .ignore
+                              }
     } yield result
 
   def make[T: BinaryCodec](a: => T, id: IdProvider = AutoId)(implicit trace: Trace): RIO[CRefContext, CRef[T]] =
