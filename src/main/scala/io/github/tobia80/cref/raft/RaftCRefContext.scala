@@ -155,9 +155,27 @@ object RaftCRefContext {
     override def onChangeStream(name: String): ZStream[Any, Throwable, ChangeEvent] =
       ZStream.from(mainHub).flattenTake.filter(_.name == name)
 
-    override def registerNode(id: String): Task[Unit] = ???
+    override def registerNode(id: String): Task[Unit] = {
+      // add raft node, update the ref and handle the change in members
+      val endpoint = Endpoint(id, myIp)
+      val transport = createTransport(endpoint, runtime)
+      for {
+        endpointList <- endpointListRef.get
+        raftNode     <- createRaftNode(endpoint, transport, endpointList, streamBuilder)
+        _            <- ZIO.fromCompletableFuture(raftNode.start())
+        _            <- endpointListRef.update(old => old + endpoint) *> myNodes.update(old =>
+                          old + (id -> NodeDescriptor(id, false, raftNode))
+                        )
+      } yield ()
+    }
 
-    override def unregisterNode(nodeId: String): Task[Unit] = ???
+    override def unregisterNode(nodeId: String): Task[Unit] = for {
+      _ <- myNodes.get.flatMap(nodeMap =>
+             nodeMap.get(nodeId).fold(ZIO.unit)(el => ZIO.fromCompletableFuture(el.node.terminate()).unit)
+           )
+      _ <- myNodes.update(old => old - nodeId)
+      _ <- endpointListRef.update(old => old.filterNot(_.getId == nodeId))
+    } yield ()
   })
 }
 
