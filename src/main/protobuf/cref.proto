@@ -48,10 +48,6 @@ message SendCommandRequest {
 message SendCommandResponse {
 }
 
-message SubscribeEventsRequest {
-
-}
-
 message Event {
   string id = 1;
 }
@@ -68,5 +64,4 @@ service CRefRaft {
 
   rpc SendCommand(SendCommandRequest) returns (SendCommandResponse) {}
 
-  rpc SubscribeEvents(SubscribeEventsRequest) returns (stream Event) {}
 }

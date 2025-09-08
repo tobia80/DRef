@@ -84,7 +84,10 @@ object RedisCRefContext {
                                 .either
                             }
                             .collect { case Right(notification) => notification }
-                            .runIntoHub(hub)
+                            .runForeach { event =>
+                              ZIO.logInfo(s"Publishing event $event to hub") *> hub
+                                .publish(Take.single(event))
+                            }
                             .forkDaemon
     } yield new CRefContext {
       private def publish(message: Chunk[Byte]) = redisClient.publish(channel, message)
@@ -143,7 +146,7 @@ object RedisCRefContext {
         redisClient.get(Chunk.fromArray(name.getBytes)).map(_.map(_.toArray))
 
       override def onChangeStream(name: String): ZStream[Any, Throwable, ChangeEvent] =
-        ZStream.fromHub(hub).flattenTake.collect {
+        ZStream.logInfo(s"Subscribing to $name") *> ZStream.fromHub(hub).flattenTake.collect {
           case c @ ChangePayload(_, value, false) if c.nameString == name => SetElement(name, value.toArray)
           case c @ ChangePayload(_, value, true) if c.nameString == name  => DeleteElement(name)
         }

@@ -20,6 +20,7 @@ object RedisCRefSpec extends ZIOSpecDefault {
         aRef          <- CRef.make("hi")
         _             <- ZIO.sleep(50.millis) // wait few milliseconds to ensure the change is not caught
         elementsFiber <- aRef.changeStream.interruptAfter(2.seconds).runCollect.forkScoped
+        _             <- ZIO.sleep(50.millis)
         _             <- aRef.set("hello")
         _             <- aRef.set("changed again")
         mutations     <- elementsFiber.join
@@ -58,5 +59,5 @@ object RedisCRefSpec extends ZIOSpecDefault {
         ttl = Some(5.seconds.asFiniteDuration)
       )
     )
-  )
+  ) @@ TestAspect.debug
 }

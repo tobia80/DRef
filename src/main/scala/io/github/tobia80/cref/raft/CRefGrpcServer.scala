@@ -4,12 +4,12 @@ import com.google.protobuf.ByteString
 import io.github.tobia80.cref.*
 import io.github.tobia80.cref.ZioCref.ZCRefRaft
 import io.grpc.{Status, StatusException}
-import io.microraft.{RaftEndpoint, RaftNode}
 import io.microraft.exception.NotLeaderException
 import io.microraft.model.message.RaftMessage
+import io.microraft.{RaftEndpoint, RaftNode}
 import org.apache.commons.lang3.SerializationUtils
 import scalapb.zio_grpc.RequestContext
-import zio.{stream, IO, Ref, ZIO}
+import zio.{IO, Ref, ZIO}
 
 class CRefGrpcServer(
   myNodes: Ref[Map[String, NodeDescriptor]],
@@ -20,7 +20,7 @@ class CRefGrpcServer(
 
   private def getLeaderNode: ZIO[Any, StatusException, RaftNode] = for {
     leader <- myNodes.get.flatMap { nodeMap =>
-                nodeMap.values.find(_.leader) match {
+                nodeMap.values.find(el => el.node.getTerm.getLeaderEndpoint.getId == el.id) match {
                   case Some(leader) => ZIO.succeed(leader.node)
                   case None         =>
                     ZIO.fail(
@@ -47,7 +47,7 @@ class CRefGrpcServer(
                     case e: NotLeaderException => buildLeaderException(e)
                     case err                   => new StatusException(io.grpc.Status.INTERNAL.withDescription(err.getMessage))
                   },
-                  _ => SetElementResponse()
+                  res => SetElementResponse()
                 )
   } yield res
 
@@ -130,12 +130,8 @@ class CRefGrpcServer(
     } yield SendCommandResponse()
   }
 
-  override def subscribeEvents(
-    request: SubscribeEventsRequest,
-    context: RequestContext
-  ): stream.Stream[StatusException, Event] = ???
 }
 
 case class LeaderException(leaderId: String, leaderAddress: String, status: Status) extends StatusException(status) {}
 
-case class NodeDescriptor(id: String, leader: Boolean, node: RaftNode)
+case class NodeDescriptor(id: String, node: RaftNode)

@@ -1,12 +1,14 @@
 package io.github.tobia80.cref.raft
 
 import io.github.tobia80.cref.ZioCref.CRefRaftClient
-import io.github.tobia80.cref.{CRefContext, ChangeEvent}
+import io.github.tobia80.cref.{CRefContext, ChangeEvent, DeleteElement, SetElement}
 import io.grpc.ServerBuilder
 import io.grpc.netty.NettyChannelBuilder
 import io.grpc.protobuf.services.ProtoReflectionService
 import io.microraft.{RaftEndpoint, RaftNode}
+import reactor.core.publisher.Sinks
 import scalapb.zio_grpc.{ServerLayer, ServiceList, ZManagedChannel}
+import zio.interop.reactivestreams.*
 import zio.stream.{Take, ZStream}
 import zio.{durationInt, Hub, Promise, Ref, Runtime, Schedule, Scope, Task, URIO, Unsafe, ZIO, ZLayer}
 
@@ -23,10 +25,10 @@ object RaftCRefContext {
     endpoint: Endpoint,
     transport: GrpcTransport,
     initialEndpoints: Set[RaftEndpoint],
-    streamBuilder: java.util.stream.Stream.Builder[ChangeEvent]
+    sink: Sinks.Many[ChangeEvent]
   ): Task[RaftNode] =
     ZIO.attempt {
-      val state = new CRefStateMachine(streamBuilder)
+      val state = new CRefStateMachine(sink)
       val raftNode = RaftNode
         .newBuilder()
         .setGroupId("default")
@@ -81,41 +83,47 @@ object RaftCRefContext {
     logic            = ServerLayer.fromServiceList(builder, services)
     ret             <- logic.launch.forkScoped
 
-    initialized                                                <- Promise.make[Throwable, Unit]
-    _                                                          <- ipProvider
-                                                                    .findNodeAddresses()
-                                                                    .flatMap(newAddresses =>
-                                                                      for {
-                                                                        addressClientMap <- ZIO
-                                                                                              .foreach(newAddresses) { address =>
-                                                                                                buildZIOGrpcClient(address, config.port).map(address -> _)
-                                                                                              }
-                                                                                              .map(_.toMap)
-                                                                        _                <- clientMapRef.update(old => addressClientMap)
+    initialized                   <- Promise.make[Throwable, Unit]
+    _                             <- ipProvider
+                                       .findNodeAddresses()
+                                       .flatMap(newAddresses =>
+                                         for {
+                                           addressClientMap <- ZIO
+                                                                 .foreach(newAddresses) { address =>
+                                                                   buildZIOGrpcClient(address, config.port).map(address -> _)
+                                                                 }
+                                                                 .map(_.toMap)
+                                           _                <- clientMapRef.update(old => addressClientMap)
 
-                                                                        endpoints        <- grpcClient.retrieveEndpoints()
-                                                                        endpointClientMap = addressClientMap.map { case (ip, client) =>
-                                                                                              client -> endpoints.filter(_.asInstanceOf[Endpoint].ip == ip).toList
-                                                                                            }
-                                                                        _                 = myTransport.updateEndpoints(endpointClientMap)
-                                                                        // discovering leader
-                                                                        _                <- initialized.succeed(())
-                                                                      } yield ()
-                                                                    )
-                                                                    .repeat(Schedule.fixed(3.seconds))
-                                                                    .fork
-    mainHub                                                    <- Hub.bounded[Take[Throwable, ChangeEvent]](64)
-    streamBuilder: java.util.stream.Stream.Builder[ChangeEvent] = java.util.stream.Stream.builder()
-    fiber                                                      <- ZStream.fromJavaStream(streamBuilder.build()).runIntoHub(mainHub).forkDaemon
+                                           endpoints        <- grpcClient.retrieveEndpoints()
+                                           endpointClientMap = addressClientMap.map { case (ip, client) =>
+                                                                 client -> endpoints.filter(_.asInstanceOf[Endpoint].ip == ip).toList
+                                                               }
+                                           _                 = myTransport.updateEndpoints(endpointClientMap)
+                                           // discovering leader
+                                           _                <- initialized.succeed(())
+                                         } yield ()
+                                       )
+                                       .repeat(Schedule.fixed(3.seconds))
+                                       .fork
+    hub                           <- Hub.bounded[Take[Throwable, ChangeEvent]](64)
+    sinks: Sinks.Many[ChangeEvent] = Sinks.many().multicast().onBackpressureBuffer[ChangeEvent]()
+    fiber                         <- sinks
+                                       .asFlux()
+                                       .toZIOStream(qSize = 16)
+                                       .runForeach { event =>
+                                         ZIO.logInfo(s"Publishing event $event to hub") *> hub
+                                           .publish(Take.single(event))
+                                       }
+                                       .forkDaemon
 
     myNode <-
-      initialized.await *> createRaftNode(myEndpoint, myTransport, myTransport.endpointsList, streamBuilder).tap {
-        node => // TODO registration should be a separate method or we should have a register method too
-          leaderEndpoint(node).flatMap { leaderEndpoint =>
-            val nodeDescriptor = NodeDescriptor(myEndpoint.id, leaderEndpoint == myEndpoint, node)
-            myNodes.update(old => old + (myEndpoint.id -> nodeDescriptor)) *>
-              ZIO.fromCompletableFuture(node.start())
-          }
+      initialized.await *> createRaftNode(myEndpoint, myTransport, myTransport.endpointsList, sinks).tap { node =>
+        val nodeDescriptor = NodeDescriptor(myEndpoint.id, node)
+        myNodes.update(old => old + (myEndpoint.id -> nodeDescriptor)) *>
+          ZIO.logInfo(s"Starting node $myEndpoint") *> ZIO.fromCompletableFuture(node.start()) *> ZIO.logInfo(
+            s"Node $myEndpoint started"
+          )
       }
   } yield new RaftCRefContext {
 
@@ -153,7 +161,8 @@ object RaftCRefContext {
       })
 
     override def onChangeStream(name: String): ZStream[Any, Throwable, ChangeEvent] =
-      ZStream.from(mainHub).flattenTake.filter(_.name == name)
+      ZStream.logInfo(s"Subscribing to $name") *>
+        ZStream.fromHub(hub).flattenTake.collect { case c if c.name == name => c }
 
     override def registerNode(id: String): Task[Unit] = {
       // add raft node, update the ref and handle the change in members
@@ -161,10 +170,14 @@ object RaftCRefContext {
       val transport = createTransport(endpoint, runtime)
       for {
         endpointList <- endpointListRef.get
-        raftNode     <- createRaftNode(endpoint, transport, endpointList, streamBuilder)
+        raftNode     <- createRaftNode(endpoint, transport, endpointList, sinks)
+        _            <- ZIO.logInfo(s"Starting node $endpoint")
         _            <- ZIO.fromCompletableFuture(raftNode.start())
+        _            <- ZIO.logInfo(
+                          s"Node $endpoint started"
+                        )
         _            <- endpointListRef.update(old => old + endpoint) *> myNodes.update(old =>
-                          old + (id -> NodeDescriptor(id, false, raftNode))
+                          old + (id -> NodeDescriptor(id, raftNode))
                         )
       } yield ()
     }
@@ -178,7 +191,3 @@ object RaftCRefContext {
     } yield ()
   })
 }
-
-//trait ChangeCallback {
-//  def onChange(event: ChangeEvent): Unit
-//}

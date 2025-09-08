@@ -3,11 +3,12 @@ package io.github.tobia80.cref.raft
 import io.github.tobia80.cref.*
 import io.github.tobia80.raft.StartNewTermOpProto
 import io.microraft.statemachine.StateMachine
+import reactor.core.publisher.Sinks
 
 import java.util
 import java.util.function.Consumer
 
-class CRefStateMachine(streamBuilder: java.util.stream.Stream.Builder[ChangeEvent]) extends StateMachine {
+class CRefStateMachine(streamBuilder: Sinks.Many[ChangeEvent]) extends StateMachine {
 
   import scala.collection.mutable
 
@@ -15,19 +16,27 @@ class CRefStateMachine(streamBuilder: java.util.stream.Stream.Builder[ChangeEven
 
   override def runOperation(commitIndex: Long, operation: Any): AnyRef =
     operation match {
-      case request: SetElementRequest    =>
-        // New term started, do nothing
+      case request: SetElementRequest           =>
         setElement(commitIndex, request)
-      case request: GetElementRequest    => getElement(commitIndex, request).orNull
-      case request: DeleteElementRequest => deleteElement(commitIndex, request).orNull
-      case _                             =>
+      case request: SetElementIfNotExistRequest =>
+        setElementIfNotExist(commitIndex, request)
+      case request: GetElementRequest           => getElement(commitIndex, request).orNull
+      case request: DeleteElementRequest        => deleteElement(commitIndex, request).orNull
+      case _                                    =>
         throw new IllegalArgumentException(s"Unsupported operation: $operation")
     }
 
   private def setElement(commitIndex: Long, operation: SetElementRequest): AnyRef = {
     val res = innerMap.put(operation.name, operation.value.toByteArray)
-    streamBuilder.add(SetElement(operation.name, operation.value.toByteArray))
+    streamBuilder.tryEmitNext(SetElement(operation.name, operation.value.toByteArray)).orThrow()
     res
+  }
+
+  private def setElementIfNotExist(commitIndex: Long, operation: SetElementIfNotExistRequest): AnyRef = {
+    val res = innerMap.get(operation.name)
+    innerMap.put(operation.name, operation.value.toByteArray)
+    streamBuilder.tryEmitNext(SetElement(operation.name, operation.value.toByteArray)).orThrow()
+    java.lang.Boolean.valueOf(res.isEmpty) // if not exist set to true
   }
 
   private def getElement(commitIndex: Long, operation: GetElementRequest): Option[Array[Byte]] =
@@ -35,7 +44,7 @@ class CRefStateMachine(streamBuilder: java.util.stream.Stream.Builder[ChangeEven
 
   private def deleteElement(commitIndex: Long, operation: DeleteElementRequest): Option[Array[Byte]] = {
     val res = innerMap.remove(operation.name)
-    streamBuilder.add(DeleteElement(operation.name))
+    streamBuilder.tryEmitNext(DeleteElement(operation.name))
     res
   }
 
