@@ -1,18 +1,18 @@
-import io.github.tobia80.cref.CRef.*
-import io.github.tobia80.cref.CRef.auto.*
-import io.github.tobia80.cref.redis.{RedisCRefContext, RedisConfig}
-import io.github.tobia80.cref.{CRef, CRefContext}
+import io.github.tobia80.dref.DRef
+import io.github.tobia80.dref.DRef.*
+import io.github.tobia80.dref.DRef.auto.*
+import io.github.tobia80.dref.raft.{IpProvider, RaftConfig, RaftDRefContext}
 import zio.{Console, ZIO, ZIOAppDefault, ZLayer, *}
 
 object Main extends ZIOAppDefault {
 
-  private case class CRefMessage(name: String, message: String)
+  private case class DRefMessage(name: String, message: String)
 
   private def printReadMessageAndSend(str: String) =
     for {
-      cref <- CRef.make[Option[CRefMessage]](None)
-      _    <- cref.onChange {
-                case Some(CRefMessage(name, message)) =>
+      dref <- DRef.make[Option[DRefMessage]](None)
+      _    <- dref.onChange {
+                case Some(DRefMessage(name, message)) =>
                   Console.printLine(s"\n<<< ($name): $message\n").when(name != str)
                 case None                             =>
                   ZIO.unit
@@ -21,8 +21,8 @@ object Main extends ZIOAppDefault {
                 for {
                   _            <- Console.printLine("Enter a message: ")
                   valueMessage <- Console.readLine
-                  crefMessage   = CRefMessage(str, valueMessage)
-                  _            <- cref.set(Some(crefMessage)).when(valueMessage.toLowerCase != "exit")
+                  drefMessage   = DRefMessage(str, valueMessage)
+                  _            <- dref.set(Some(drefMessage)).when(valueMessage.toLowerCase != "exit")
                 } yield valueMessage
               }
     } yield ()
@@ -40,10 +40,9 @@ object Main extends ZIOAppDefault {
 
       }
       .provide(
-        RedisCRefContext.live,
-        ZLayer.succeed(
-          RedisConfig("host", 6379, 0, None, None, None, Some(50.minutes.asFiniteDuration))
-        ),
+        RaftDRefContext.live,
+        ZLayer.succeed(RaftConfig(8082)),
+        IpProvider.static("192.168.4.54", "192.168.4.79"),
         Scope.default
       )
 }

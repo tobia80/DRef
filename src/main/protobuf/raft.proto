@@ -1,5 +1,5 @@
 syntax = "proto3";
-import "cref.proto";
+import "dref.proto";
 
 package io.github.tobia80;
 

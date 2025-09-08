@@ -1,23 +1,23 @@
-package io.github.tobia80.cref
+package io.github.tobia80.dref
 
-import CRef.*
-import io.github.tobia80.cref.redis.RedisCRefSpec.test
+import DRef.*
+import io.github.tobia80.dref.redis.RedisDRefSpec.test
 import zio.test.{assertTrue, Spec, TestAspect, TestClock, TestEnvironment, ZIOSpecDefault}
 import zio.{durationInt, Ref, Scope, ZIO}
 
-object CRefSpec extends ZIOSpecDefault {
+object DRefSpec extends ZIOSpecDefault {
 
-  override def spec: Spec[TestEnvironment & Scope, Any] = suite("CRef memory")(
-    test("should be able to create a CRef") {
+  override def spec: Spec[TestEnvironment & Scope, Any] = suite("DRef memory")(
+    test("should be able to create a DRef") {
       for {
-        aRef  <- CRef.make("hi")
+        aRef  <- DRef.make("hi")
         _     <- aRef.set("hello")
         value <- aRef.get
       } yield assertTrue(value == "hello")
     },
     test("should be able to listen for changes") {
       for {
-        aRef          <- CRef.make("hi")
+        aRef          <- DRef.make("hi")
         elementsFiber <- aRef.changeStream.interruptAfter(2.seconds).runCollect.fork
         _             <- aRef.set("hello")
         _             <- aRef.set("changed again")
@@ -30,7 +30,7 @@ object CRefSpec extends ZIOSpecDefault {
         list              <- Ref.make[List[Int]](Nil)
         fiber             <- ZIO
                                .foreachParDiscard(List(100, 200)) { id =>
-                                 (ZIO.logInfo(s"Starting $id") *> CRef
+                                 (ZIO.logInfo(s"Starting $id") *> DRef
                                    .lock() {
                                      ZIO.logInfo(s"Executing $id") *> list.update(_ :+ id) *> ZIO
                                        .sleep(1.seconds)
@@ -44,5 +44,5 @@ object CRefSpec extends ZIOSpecDefault {
         valueWithTwoLocks <- list.get
       } yield assertTrue(valueWithOneLock == List(100) && valueWithTwoLocks == List(100, 200))
     } @@ TestAspect.withLiveClock
-  ).provide(CRefContext.local)
+  ).provide(DRefContext.local)
 }

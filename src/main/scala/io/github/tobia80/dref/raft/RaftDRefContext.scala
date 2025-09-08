@@ -1,7 +1,7 @@
-package io.github.tobia80.cref.raft
+package io.github.tobia80.dref.raft
 
-import io.github.tobia80.cref.ZioCref.CRefRaftClient
-import io.github.tobia80.cref.{CRefContext, ChangeEvent, DeleteElement, SetElement}
+import io.github.tobia80.dref.ZioDref.DRefRaftClient
+import io.github.tobia80.dref.{ChangeEvent, DRefContext}
 import io.grpc.ServerBuilder
 import io.grpc.netty.NettyChannelBuilder
 import io.grpc.protobuf.services.ProtoReflectionService
@@ -10,11 +10,11 @@ import reactor.core.publisher.Sinks
 import scalapb.zio_grpc.{ServerLayer, ServiceList, ZManagedChannel}
 import zio.interop.reactivestreams.*
 import zio.stream.{Take, ZStream}
-import zio.{durationInt, Hub, Promise, Ref, Runtime, Schedule, Scope, Task, URIO, Unsafe, ZIO, ZLayer}
+import zio.{Hub, Promise, Ref, Runtime, Schedule, Scope, Task, URIO, Unsafe, ZIO, ZLayer, durationInt}
 
 case class RaftConfig(port: Int)
 
-object RaftCRefContext {
+object RaftDRefContext {
 
   import scala.jdk.CollectionConverters.*
 
@@ -28,7 +28,7 @@ object RaftCRefContext {
     sink: Sinks.Many[ChangeEvent]
   ): Task[RaftNode] =
     ZIO.attempt {
-      val state = new CRefStateMachine(sink)
+      val state = new DRefStateMachine(sink)
       val raftNode = RaftNode
         .newBuilder()
         .setGroupId("default")
@@ -41,8 +41,8 @@ object RaftCRefContext {
       raftNode
     }
 
-  private def buildZIOGrpcClient(address: String, port: Int): ZIO[Scope, Throwable, CRefRaftClient] =
-    CRefRaftClient.scoped(
+  private def buildZIOGrpcClient(address: String, port: Int): ZIO[Scope, Throwable, DRefRaftClient] =
+    DRefRaftClient.scoped(
       ZManagedChannel(NettyChannelBuilder.forAddress(address, port).usePlaintext())
     )
 
@@ -55,7 +55,7 @@ object RaftCRefContext {
       case _              => leaderEndpoint(raftNode).delay(20.millis)
     }
 
-  trait RaftCRefContext extends CRefContext {
+  trait RaftDRefContext extends DRefContext {
 
     def registerNode(id: String): Task[Unit]
 
@@ -63,23 +63,23 @@ object RaftCRefContext {
 
   }
 
-  val live: ZLayer[IpProvider & RaftConfig & Scope, Throwable, RaftCRefContext] = ZLayer(for {
+  val live: ZLayer[IpProvider & RaftConfig & Scope, Throwable, RaftDRefContext] = ZLayer(for {
     config          <- ZIO.service[RaftConfig]
     ipProvider      <- ZIO.service[IpProvider]
     runtime         <- ZIO.runtime[Any]
     myIp            <- ipProvider.findMyAddress()
     id              <- ZIO.randomWith(_.nextLongBetween(0, 99999)).map(_.toString)
     myEndpoint       = Endpoint(id, myIp)
-    clientMapRef    <- Ref.make[Map[String, CRefRaftClient]](Map.empty)
+    clientMapRef    <- Ref.make[Map[String, DRefRaftClient]](Map.empty)
     grpcClient       = new GrpcClient(clientMapRef)
     myTransport      = createTransport(myEndpoint, runtime)
     endpointListRef <- Ref.make[Set[RaftEndpoint]](Set(myEndpoint))
     myNodes         <- Ref.make[Map[String, NodeDescriptor]](
                          Map.empty
                        )
-    crefServer       = CRefGrpcServer(myNodes, endpointListRef)
+    drefServer       = DRefGrpcServer(myNodes, endpointListRef)
     builder          = ServerBuilder.forPort(config.port).addService(ProtoReflectionService.newInstance())
-    services         = ServiceList.add(crefServer)
+    services         = ServiceList.add(drefServer)
     logic            = ServerLayer.fromServiceList(builder, services)
     ret             <- logic.launch.forkScoped
 
@@ -112,7 +112,7 @@ object RaftCRefContext {
                                        .asFlux()
                                        .toZIOStream(qSize = 16)
                                        .runForeach { event =>
-                                         ZIO.logInfo(s"Publishing event $event to hub") *> hub
+                                         ZIO.logDebug(s"Publishing event $event to hub") *> hub
                                            .publish(Take.single(event))
                                        }
                                        .forkDaemon
@@ -125,7 +125,7 @@ object RaftCRefContext {
             s"Node $myEndpoint started"
           )
       }
-  } yield new RaftCRefContext {
+  } yield new RaftDRefContext {
 
     private def retryOnLeaderException[T](task: Task[T]) =
       task.retry(

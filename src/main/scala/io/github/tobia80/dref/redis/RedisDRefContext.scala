@@ -1,6 +1,6 @@
-package io.github.tobia80.cref.redis
+package io.github.tobia80.dref.redis
 
-import io.github.tobia80.cref.*
+import io.github.tobia80.dref.*
 import io.github.vigoo.desert.zioschema.DerivedBinaryCodec
 import io.github.vigoo.desert.{deserializeFromArray, serializeToArray, BinaryCodec, DesertFailure}
 import io.lettuce.core.{ClientOptions, RedisURI, SslOptions}
@@ -54,7 +54,7 @@ object RedisConfig {
   def get: URIO[RedisConfig, RedisConfig] = ZIO.service[RedisConfig]
 }
 
-object RedisCRefContext {
+object RedisDRefContext {
 
   private case class ChangePayload(name: Chunk[Byte], value: Chunk[Byte], delete: Boolean = false) {
 
@@ -65,9 +65,9 @@ object RedisCRefContext {
   private given Schema[ChangePayload] = DeriveSchema.gen[ChangePayload]
   private given BinaryCodec[ChangePayload] = DerivedBinaryCodec.derive
 
-  private val channel = Chunk.fromArray("cref-change".getBytes)
+  private val channel = Chunk.fromArray("dref-change".getBytes)
 
-  val live: ZLayer[zio.Scope & RedisConfig, Throwable, CRefContext] = ZLayer(
+  val live: ZLayer[zio.Scope & RedisConfig, Throwable, DRefContext] = ZLayer(
     for {
       config           <- ZIO.service[RedisConfig]
       redisClient      <- RedisClient.make(config)
@@ -85,11 +85,11 @@ object RedisCRefContext {
                             }
                             .collect { case Right(notification) => notification }
                             .runForeach { event =>
-                              ZIO.logInfo(s"Publishing event $event to hub") *> hub
+                              ZIO.logDebug(s"Publishing event $event to hub") *> hub
                                 .publish(Take.single(event))
                             }
                             .forkDaemon
-    } yield new CRefContext {
+    } yield new DRefContext {
       private def publish(message: Chunk[Byte]) = redisClient.publish(channel, message)
 
       override def setElement(name: String, a: Array[Byte]): Task[Unit] = {

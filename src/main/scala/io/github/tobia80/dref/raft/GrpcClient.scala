@@ -1,14 +1,14 @@
-package io.github.tobia80.cref.raft
+package io.github.tobia80.dref.raft
 
-import io.github.tobia80.cref.GetEndpointsRequest
-import io.github.tobia80.cref.ZioCref.CRefRaftClient
+import io.github.tobia80.dref.GetEndpointsRequest
+import io.github.tobia80.dref.ZioDref.DRefRaftClient
 import io.microraft.RaftEndpoint
 import zio.stream.ZStream
 import zio.{Chunk, Ref, Task, ZIO}
 
-class GrpcClient(clientsRef: Ref[Map[String, CRefRaftClient]]) {
+class GrpcClient(clientsRef: Ref[Map[String, DRefRaftClient]]) {
 
-  private def getClient(raftEndpoint: RaftEndpoint): Task[CRefRaftClient] =
+  private def getClient(raftEndpoint: RaftEndpoint): Task[DRefRaftClient] =
     clientsRef.get.flatMap { clients =>
       clients.get(raftEndpoint.asInstanceOf[Endpoint].ip) match {
         case Some(client) => ZIO.succeed(client)
@@ -28,11 +28,11 @@ class GrpcClient(clientsRef: Ref[Map[String, CRefRaftClient]]) {
     raftRes  = res.map(e => e.asInstanceOf[RaftEndpoint])
   } yield raftRes
 
-  def sendCRefCommand(target: RaftEndpoint, command: Array[Byte]): Task[Unit] = for {
+  def sendDRefCommand(target: RaftEndpoint, command: Array[Byte]): Task[Unit] = for {
     client <- getClient(target)
     result <- client
                 .sendCommand(
-                  io.github.tobia80.cref
+                  io.github.tobia80.dref
                     .SendCommandRequest(
                       target.getId.asInstanceOf[String],
                       com.google.protobuf.ByteString.copyFrom(command)
@@ -47,7 +47,7 @@ class GrpcClient(clientsRef: Ref[Map[String, CRefRaftClient]]) {
     client <- getClient(target)
     result <- client
                 .setElement(
-                  io.github.tobia80.cref
+                  io.github.tobia80.dref
                     .SetElementRequest(
                       target.getId.asInstanceOf[String],
                       name,
@@ -61,7 +61,7 @@ class GrpcClient(clientsRef: Ref[Map[String, CRefRaftClient]]) {
     client <- getClient(target)
     result <- client
                 .setElementIfNotExist(
-                  io.github.tobia80.cref
+                  io.github.tobia80.dref
                     .SetElementIfNotExistRequest(
                       target.getId.asInstanceOf[String],
                       name,
@@ -74,7 +74,7 @@ class GrpcClient(clientsRef: Ref[Map[String, CRefRaftClient]]) {
     client <- getClient(target)
     result <- client
                 .getElement(
-                  io.github.tobia80.cref
+                  io.github.tobia80.dref
                     .GetElementRequest(
                       target.getId.asInstanceOf[String],
                       name
@@ -87,7 +87,7 @@ class GrpcClient(clientsRef: Ref[Map[String, CRefRaftClient]]) {
     client <- getClient(target)
     result <- client
                 .deleteElement(
-                  io.github.tobia80.cref
+                  io.github.tobia80.dref
                     .DeleteElementRequest(
                       target.getId.asInstanceOf[String],
                       name

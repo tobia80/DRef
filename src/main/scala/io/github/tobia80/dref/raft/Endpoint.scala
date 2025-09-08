@@ -1,4 +1,4 @@
-package io.github.tobia80.cref.raft
+package io.github.tobia80.dref.raft
 
 import io.microraft.RaftEndpoint
 

@@ -1,6 +1,6 @@
-package io.github.tobia80.cref.raft
+package io.github.tobia80.dref.raft
 
-import io.github.tobia80.cref.*
+import io.github.tobia80.dref.*
 import io.github.tobia80.raft.StartNewTermOpProto
 import io.microraft.statemachine.StateMachine
 import reactor.core.publisher.Sinks
@@ -8,7 +8,7 @@ import reactor.core.publisher.Sinks
 import java.util
 import java.util.function.Consumer
 
-class CRefStateMachine(streamBuilder: Sinks.Many[ChangeEvent]) extends StateMachine {
+class DRefStateMachine(streamBuilder: Sinks.Many[ChangeEvent]) extends StateMachine {
 
   import scala.collection.mutable
 

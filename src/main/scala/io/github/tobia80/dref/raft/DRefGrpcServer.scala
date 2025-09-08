@@ -1,8 +1,8 @@
-package io.github.tobia80.cref.raft
+package io.github.tobia80.dref.raft
 
 import com.google.protobuf.ByteString
-import io.github.tobia80.cref.*
-import io.github.tobia80.cref.ZioCref.ZCRefRaft
+import io.github.tobia80.dref.*
+import io.github.tobia80.dref.ZioDref.ZDRefRaft
 import io.grpc.{Status, StatusException}
 import io.microraft.exception.NotLeaderException
 import io.microraft.model.message.RaftMessage
@@ -11,10 +11,10 @@ import org.apache.commons.lang3.SerializationUtils
 import scalapb.zio_grpc.RequestContext
 import zio.{IO, Ref, ZIO}
 
-class CRefGrpcServer(
+class DRefGrpcServer(
   myNodes: Ref[Map[String, NodeDescriptor]],
   endpoints: Ref[Set[RaftEndpoint]]
-) extends ZCRefRaft[RequestContext] {
+) extends ZDRefRaft[RequestContext] {
 
   // when receiving element, trigger the local term using the state machine, convert it back to bytes and return
 

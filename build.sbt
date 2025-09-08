@@ -10,7 +10,7 @@ ThisBuild / organizationHomepage := Some(url("https://tobia80.github.io"))
 
 lazy val root = (project in file("."))
   .settings(
-    name := "Cref",
+    name := "DRef",
     libraryDependencies ++= Seq(
       "dev.zio"         %% "zio"                         % "2.1.21",
       "dev.zio"         %% "zio-interop-reactivestreams" % "2.0.2",

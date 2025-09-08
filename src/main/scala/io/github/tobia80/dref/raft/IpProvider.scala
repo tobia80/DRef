@@ -1,4 +1,4 @@
-package io.github.tobia80.cref.raft
+package io.github.tobia80.dref.raft
 
 import zio.{Task, ZIO, ZLayer}
 
@@ -10,11 +10,22 @@ trait IpProvider {
 
 object IpProvider { // TODO use k8s to retrieve ips for one service
 
-  def static(myIp: String, allIps: List[String]): ZLayer[Any, Nothing, IpProvider] = ZLayer.succeed {
+  def local: ZLayer[Any, Nothing, IpProvider] = ZLayer.succeed {
     new IpProvider {
-      override def findNodeAddresses(): Task[List[String]] = ZIO.succeed(allIps)
+      override def findNodeAddresses(): Task[List[String]] = ZIO.succeed(List("127.0.0.1"))
 
-      override def findMyAddress(): Task[String] = ZIO.succeed(myIp)
+      override def findMyAddress(): Task[String] = ZIO.succeed("127.0.0.1")
+    }
+  }
+
+  def static(ips: String*): ZLayer[Any, Nothing, IpProvider] = ZLayer.succeed {
+    new IpProvider {
+      override def findNodeAddresses(): Task[List[String]] = ZIO.succeed(ips.toList)
+
+      override def findMyAddress(): Task[String] = ZIO.attempt {
+        import java.net.InetAddress
+        InetAddress.getLocalHost.getHostAddress
+      }
     }
   }
 

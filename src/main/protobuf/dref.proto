@@ -53,7 +53,7 @@ message Event {
 }
 
 
-service CRefRaft {
+service DRefRaft {
 
   rpc SetElement(SetElementRequest) returns (SetElementResponse) {}
   rpc SetElementIfNotExist(SetElementIfNotExistRequest) returns (SetElementIfNotExistResponse) {}

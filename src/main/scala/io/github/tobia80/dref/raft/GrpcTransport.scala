@@ -1,8 +1,8 @@
-package io.github.tobia80.cref.raft
+package io.github.tobia80.dref.raft
 
 import com.google.protobuf.ByteString
-import io.github.tobia80.cref.SendCommandRequest
-import io.github.tobia80.cref.ZioCref.CRefRaftClient
+import io.github.tobia80.dref.SendCommandRequest
+import io.github.tobia80.dref.ZioDref.DRefRaftClient
 import io.microraft.RaftEndpoint
 import io.microraft.model.message.RaftMessage
 import io.microraft.transport.Transport
@@ -11,7 +11,7 @@ import zio.{Runtime, Unsafe}
 
 class GrpcTransport(source: RaftEndpoint, runtime: Runtime[Any]) extends Transport {
 
-  private var endpointsClient: Map[CRefRaftClient, List[RaftEndpoint]] = Map.empty
+  private var endpointsClient: Map[DRefRaftClient, List[RaftEndpoint]] = Map.empty
 
   override def send(target: RaftEndpoint, message: RaftMessage): Unit = {
 
@@ -29,13 +29,13 @@ class GrpcTransport(source: RaftEndpoint, runtime: Runtime[Any]) extends Transpo
     }
   }
 
-  private def findClient(target: RaftEndpoint): Option[CRefRaftClient] =
+  private def findClient(target: RaftEndpoint): Option[DRefRaftClient] =
     endpointsClient.find { case (_, endpoints) => endpoints.contains(target) }.map(_._1)
 
   override def isReachable(endpoint: RaftEndpoint): Boolean = endpointsList.contains(endpoint)
 
   def endpointsList: Set[RaftEndpoint] = endpointsClient.values.flatMap(_.toList).toSet
 
-  def updateEndpoints(updatedEndpoints: Map[CRefRaftClient, List[RaftEndpoint]]): Unit =
+  def updateEndpoints(updatedEndpoints: Map[DRefRaftClient, List[RaftEndpoint]]): Unit =
     endpointsClient = updatedEndpoints
 }

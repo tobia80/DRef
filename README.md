@@ -1,56 +1,59 @@
-# CRef
+# DRef
 
-Cluster Ref (CRef) is a distributed variable implementation designed to synchronize state across multiple nodes in a cluster. It provides a simple and robust abstraction for managing shared, mutable state in distributed systems. In addition to distributed references, CRef also implements distributed locks and pub/sub patterns for advanced coordination and messaging.
+Distributed Ref (DRef) is a distributed variable implementation designed to synchronize state across multiple nodes in one or more distributed systems. It provides a simple and robust abstraction for managing shared, mutable state in distributed systems. In addition to distributed references, DRef also implements distributed locks and pub/sub patterns for advanced coordination and messaging.
 Memory implementation is backed by Ref and it is useful for testing or single-node applications.
 
 ## Use cases
-It can be used to implement leader election, shard management, locks and everything that needs coordination across nodes.
+It can be used to implement leader election, shard management, change notifications, locks and everything that needs coordination across nodes.
 
 ## Features
+- Built on top of ZIO for asynchronous and concurrent programming
 - Distributed, strongly-consistent reference (Ref) abstraction
 - Distributed locks for mutual exclusion across nodes
 - Pub/Sub pattern for event-driven communication
 - Transparent serialization and deserialization of data
+- Automatic optimisation of data (only diff are sent across the wire)
+- Highly configurable and extensible
 - Incredibly simple API similar to Ref
 - Synchronizes state across cluster nodes
-- Pluggable backend (e.g., Redis, in-memory, Raft (soon), etc.)
+- Pluggable backend (e.g. Raft, Redis, in-memory, etc.)
 - Testable in ms
 
 ## Getting Started
 
-Add CRef to your project dependencies
+Add DRef to your project dependencies
 
 ## Usage Example
 
-Below is a typical usage pattern for CRef. Replace with actual code from your main or test files if available.
+Below is a typical usage pattern for DRef. Replace with actual code from your main or test files if available.
 
 ```scala
-import cref.CRef
+import dref.DRef
 import zio._
 
 object Example extends ZIOAppDefault {
   override def run = for {
-    cref <- CRef.make[Int](0) // Create a distributed ref with initial value 0
-    _    <- cref.update(_ + 1) // Atomically increment the value
-    v    <- cref.get           // Read the current value
+    dref <- DRef.make[Int](0) // Create a distributed ref with initial value 0
+    _    <- dref.update(_ + 1) // Atomically increment the value
+    v    <- dref.get           // Read the current value
     _    <- ZIO.logInfo(s"Current value: $v")
   } yield ()
 }
 ```
-CRef takes an id to uniquely identify the reference across the cluster. The default provider is Auto that generates automatically an id based on the source code location. If you see weird behaviours, it could be safer to use ManualId setting a unique reference across nodes.
+DRef takes an id to uniquely identify the reference across the nodes. The default provider is Auto that generates automatically an id based on the source code location. If you see weird behaviours, it could be safer to use ManualId setting a unique reference across nodes.
 
 ## Leader election example
-CRef can be used to implement leader election in a distributed system. Here is an example:
+DRef can be used to implement leader election in a distributed system. Here is an example:
 
 ```scala
 
-import cref.CRef
-import cref.CRef.*
+import dref.DRef
+import dref.DRef.*
 import zio._
 
 object Example extends ZIOAppDefault {
   override def run = for {
-    leadershipInfo <- CRef.make[LeadershipInfo](LeadershipInfo(info = None))
+    leadershipInfo <- DRef.make[LeadershipInfo](LeadershipInfo(info = None))
     _    <- leadershipInfo.getAndUpdateZIO{ info =>
       if (!info.leaderElected) setAsLeader(info) <* ZIO.logInfo("I am the leader")
       else ZIO.logInfo(s"Leader already elected: ${info.info}") *> ZIO.succeed(info)
@@ -60,10 +63,10 @@ object Example extends ZIOAppDefault {
 ```
 ## Distributed Locks Example
 
-CRef provides distributed locks to ensure mutual exclusion across fibers or nodes. Here is an example inspired by the test suite:
+DRef provides distributed locks to ensure mutual exclusion across fibers or nodes. Here is an example inspired by the test suite:
 
 ```scala
-import cref.CRef
+import dref.DRef
 import zio._
 
 object LockExample extends ZIOAppDefault {
@@ -71,7 +74,7 @@ object LockExample extends ZIOAppDefault {
     list  <- Ref.make(List.empty[Int])
     fiber <- ZIO.foreachParDiscard(List(100, 200)) { id =>
       (ZIO.logInfo(s"Starting $id") *>
-        CRef.lock() {
+        DRef.lock() {
           ZIO.logInfo(s"Executing $id") *>
           list.update(_ :+ id) *>
           ZIO.sleep(1.second)
@@ -90,7 +93,7 @@ This example shows two concurrent tasks attempting to acquire the same lock. The
 
 ## Testing
 
-CRef includes a comprehensive test suite. To run the tests:
+DRef includes a comprehensive test suite. To run the tests:
 ```sh
 sbt test
 ```
