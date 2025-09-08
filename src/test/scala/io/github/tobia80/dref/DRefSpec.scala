@@ -1,37 +1,36 @@
-package io.github.tobia80.cref.redis
+package io.github.tobia80.dref
 
-import io.github.tobia80.cref.CRef.*
-import io.github.tobia80.cref.CRef
-import io.github.tobia80.cref.redis.{RedisCRefContext, RedisConfig}
-import zio.*
+import DRef.*
+import io.github.tobia80.dref.redis.RedisDRefSpec.test
 import zio.test.{assertTrue, Spec, TestAspect, TestClock, TestEnvironment, ZIOSpecDefault}
+import zio.{durationInt, Ref, Scope, ZIO}
 
-object RedisCRefSpec extends ZIOSpecDefault {
+object DRefSpec extends ZIOSpecDefault {
 
-  override def spec: Spec[TestEnvironment & Scope, Any] = suite("CRef Redis")(
-    test("should be able to create a CRef") {
+  override def spec: Spec[TestEnvironment & Scope, Any] = suite("DRef memory")(
+    test("should be able to create a DRef") {
       for {
-        aRef  <- CRef.make("hi")
+        aRef  <- DRef.make("hi")
         _     <- aRef.set("hello")
         value <- aRef.get
       } yield assertTrue(value == "hello")
     },
     test("should be able to listen for changes") {
       for {
-        aRef          <- CRef.make("hi")
-        _             <- ZIO.sleep(50.millis) // wait few milliseconds to ensure the change is not caught
-        elementsFiber <- aRef.changeStream.interruptAfter(2.seconds).runCollect.forkScoped
+        aRef          <- DRef.make("hi")
+        elementsFiber <- aRef.changeStream.interruptAfter(2.seconds).runCollect.fork
         _             <- aRef.set("hello")
         _             <- aRef.set("changed again")
+        _             <- TestClock.adjust(2.seconds)
         mutations     <- elementsFiber.join
-      } yield assertTrue(mutations == Chunk("hello", "changed again"))
-    } @@ TestAspect.withLiveClock,
+      } yield assertTrue(mutations == List("hello", "changed again"))
+    },
     test("locks should work") { // two fibers trying to lock the same resource, waiting 1 seconds, queue is written and sleep, when 2 seconds pass, queue is 2 elements
       for {
         list              <- Ref.make[List[Int]](Nil)
         fiber             <- ZIO
                                .foreachParDiscard(List(100, 200)) { id =>
-                                 (ZIO.logInfo(s"Starting $id") *> CRef
+                                 (ZIO.logInfo(s"Starting $id") *> DRef
                                    .lock() {
                                      ZIO.logInfo(s"Executing $id") *> list.update(_ :+ id) *> ZIO
                                        .sleep(1.seconds)
@@ -45,19 +44,5 @@ object RedisCRefSpec extends ZIOSpecDefault {
         valueWithTwoLocks <- list.get
       } yield assertTrue(valueWithOneLock == List(100) && valueWithTwoLocks == List(100, 200))
     } @@ TestAspect.withLiveClock
-  ).provide(
-    RedisCRefContext.live,
-    Scope.default,
-    ZLayer.succeed(
-      RedisConfig(
-        host = "localhost",
-        port = 6379,
-        database = 0,
-        username = None,
-        password = None,
-        caCert = None,
-        ttl = Some(5.seconds.asFiniteDuration)
-      )
-    )
-  )
+  ).provide(DRefContext.local)
 }

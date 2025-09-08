@@ -1,4 +1,4 @@
-package io.github.tobia80.cref.redis
+package io.github.tobia80.dref.redis
 
 import io.lettuce.core
 import io.lettuce.core.SetArgs
