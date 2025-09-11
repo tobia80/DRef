@@ -44,7 +44,7 @@ object RaftDRefSpec extends ZIOSpecDefault {
                                  (ZIO.logInfo(s"Starting $id") *> DRef
                                    .lock() {
                                      ZIO.logInfo(s"Executing $id") *> list.update(_ :+ id) *> ZIO
-                                       .sleep(2.seconds)
+                                       .sleep(1.seconds)
                                    })
                                    .delay(id.millis)
                                }
