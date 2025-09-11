@@ -4,7 +4,7 @@ import io.github.tobia80.dref.GetEndpointsRequest
 import io.github.tobia80.dref.ZioDref.DRefRaftClient
 import io.microraft.RaftEndpoint
 import zio.stream.ZStream
-import zio.{Chunk, Ref, Task, ZIO}
+import zio.{durationInt, Chunk, Ref, Task, ZIO}
 
 class GrpcClient(clientsRef: Ref[Map[String, DRefRaftClient]]) {
 
@@ -17,15 +17,29 @@ class GrpcClient(clientsRef: Ref[Map[String, DRefRaftClient]]) {
     }
 
   def retrieveEndpoints(): Task[Set[RaftEndpoint]] = for {
-    clients <- clientsRef.get
-    res     <- ZIO
-                 .foreach(clients.toList) { ipAndClient =>
-                   ipAndClient._2.getEndpoints(GetEndpointsRequest()).map { response =>
-                     response.ids.map(id => Endpoint(id, ipAndClient._1))
-                   }
-                 }
-                 .map(_.flatten.toSet)
-    raftRes  = res.map(e => e.asInstanceOf[RaftEndpoint])
+    clients                   <- clientsRef.get
+    res: Set[Endpoint]        <- ZIO
+                                   .foreach(clients.toList) { ipAndClient =>
+                                     ipAndClient._2
+                                       .getEndpoints(GetEndpointsRequest())
+                                       .map { response =>
+                                         response.ids.map(id => Endpoint(id, ipAndClient._1))
+                                       }
+                                       .timeout(5.seconds)
+                                       .tapError(err =>
+                                         ZIO.logInfo(s"Cannot connect to ${ipAndClient._1} because of ${err.getMessage}")
+                                       )
+                                       .catchAll(_ => ZIO.none)
+                                   }
+                                   .map { elements =>
+                                     elements
+                                       .collect { case Some(value) =>
+                                         value
+                                       }
+                                       .flatten
+                                       .toSet
+                                   }
+    raftRes: Set[RaftEndpoint] = res.map(e => e.asInstanceOf[RaftEndpoint])
   } yield raftRes
 
   def sendDRefCommand(target: RaftEndpoint, command: Array[Byte]): Task[Unit] = for {

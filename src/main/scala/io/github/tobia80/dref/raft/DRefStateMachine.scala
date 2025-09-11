@@ -22,6 +22,9 @@ class DRefStateMachine(streamBuilder: Sinks.Many[ChangeEvent]) extends StateMach
         setElementIfNotExist(commitIndex, request)
       case request: GetElementRequest           => getElement(commitIndex, request).orNull
       case request: DeleteElementRequest        => deleteElement(commitIndex, request).orNull
+      case request: StartNewTermOpProto         =>
+        // No special handling needed for new term in this state machine
+        null
       case _                                    =>
         throw new IllegalArgumentException(s"Unsupported operation: $operation")
     }

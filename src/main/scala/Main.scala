@@ -42,7 +42,7 @@ object Main extends ZIOAppDefault {
       .provide(
         RaftDRefContext.live,
         ZLayer.succeed(RaftConfig(8082)),
-        IpProvider.static("192.168.4.54", "192.168.4.79"),
+        IpProvider.static("192.168.4.54", "192.168.4.79", "192.168.4.110"),
         Scope.default
       )
 }

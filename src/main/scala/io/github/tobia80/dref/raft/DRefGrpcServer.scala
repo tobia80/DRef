@@ -134,4 +134,4 @@ class DRefGrpcServer(
 
 case class LeaderException(leaderId: String, leaderAddress: String, status: Status) extends StatusException(status) {}
 
-case class NodeDescriptor(id: String, node: RaftNode)
+case class NodeDescriptor(id: String, node: RaftNode, transport: GrpcTransport)
