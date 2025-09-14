@@ -4,7 +4,11 @@ import io.github.tobia80.dref.DRef.auto.*
 import io.github.tobia80.dref.raft.{IpProvider, RaftConfig, RaftDRefContext}
 import zio.{Console, ZIO, ZIOAppDefault, ZLayer, *}
 
+import scala.Console.{BLUE, CYAN, RESET}
+
 object Main extends ZIOAppDefault {
+
+//  override val bootstrap = Runtime.removeDefaultLoggers
 
   private case class DRefMessage(name: String, message: String)
 
@@ -13,13 +17,13 @@ object Main extends ZIOAppDefault {
       dref <- DRef.make[Option[DRefMessage]](None)
       _    <- dref.onChange {
                 case Some(DRefMessage(name, message)) =>
-                  Console.printLine(s"\n<<< ($name): $message\n").when(name != str)
+                  Console.printLine(s"\n$CYAN<<< ($name): $message$RESET\n").when(name != str)
                 case None                             =>
                   ZIO.unit
               }
       _    <- ZIO.iterate("")(_.toLowerCase != "exit") { _ =>
                 for {
-                  _            <- Console.printLine("Enter a message: ")
+                  _            <- Console.printLine(BLUE + s" Enter a message: $RESET")
                   valueMessage <- Console.readLine
                   drefMessage   = DRefMessage(str, valueMessage)
                   _            <- dref.set(Some(drefMessage)).when(valueMessage.toLowerCase != "exit")

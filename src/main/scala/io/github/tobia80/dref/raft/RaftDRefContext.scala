@@ -83,10 +83,12 @@ object RaftDRefContext {
             leaderNode.getCommittedMembers.getLogIndex
           )
         ) // TODO what to put in commit index?
-        .unit
         .tapError(err =>
           ZIO.logError(s"Error adding member $endpoint current endpoints are $currentEndpoints: ${err.getMessage}")
         )
+        .ignore
+        .unit
+
     }
     val removeTasks = removals.toList.map { endpoint =>
       ZIO
@@ -94,10 +96,12 @@ object RaftDRefContext {
           leaderNode
             .changeMembership(endpoint, MembershipChangeMode.REMOVE_MEMBER, leaderNode.getCommittedMembers.getLogIndex)
         )
-        .unit
         .tapError(err =>
           ZIO.logError(s"Error removing member $endpoint current endpoints are $currentEndpoints: ${err.getMessage}")
         )
+        .ignore
+        .unit
+
     }
     ZIO.collectAll(addTasks ++ removeTasks).unit
   }
@@ -115,6 +119,7 @@ object RaftDRefContext {
     myTransport           = createTransport(myEndpoint, runtime)
     transports           <- Ref.make[Map[String, GrpcTransport]](Map(id -> myTransport))
     endpointsOnThisJvm   <- Ref.make[Set[RaftEndpoint]](Set(myEndpoint))
+    cachedAllEndpoints   <- Ref.make[Set[RaftEndpoint]](Set(myEndpoint))
     myNodes              <- Ref.make[Map[String, NodeDescriptor]](
                               Map.empty
                             )
@@ -136,7 +141,7 @@ object RaftDRefContext {
                                                                  .map(_.toMap)
                                            _                <- clientMapRef.update(old => addressClientMap)
 
-                                           oldEndpoints     <- endpointsOnThisJvm.get
+                                           oldEndpoints     <- cachedAllEndpoints.get
                                            endpoints        <- grpcClient.retrieveEndpoints()
                                            _                <- ZIO.logInfo(s"Discovered endpoints: $endpoints")
                                            endpointClientMap = addressClientMap.map { case (ip, client) =>
@@ -150,12 +155,16 @@ object RaftDRefContext {
                                            _                   <- transports.get.map { inner =>
                                                                     inner.values.map(_.updateEndpoints(endpointClientMap))
                                                                   } // update all the transports not only mine
+                                           _                   <- ZIO.logInfo("Finding leader")
                                            leaderNodeHereMaybe <- findLeaderNode(myNodes)
+                                           _                   <- ZIO.logInfo(s"Finished leader discovery ${leaderNodeHereMaybe.map(_.getLocalEndpoint)}")
                                            _                   <- leaderNodeHereMaybe match {
                                                                     case Some(leaderHere) =>
                                                                       propagateMembership(leaderHere, endpoints, additions, removals) // propagate changes
                                                                     case None             => ZIO.unit
                                                                   }
+                                           _                   <- ZIO.logInfo("Finished propagation")
+                                           _                   <- cachedAllEndpoints.set(endpoints)
                                            _                   <- initialized.succeed(())
                                          } yield ()
                                        )
