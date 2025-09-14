@@ -1,3 +1,5 @@
+import Dependencies.zio
+
 import scala.collection.Seq
 
 ThisBuild / version := "0.2.4"
@@ -13,37 +15,76 @@ lazy val root = (project in file("."))
   .settings(
     name := "DRef",
     libraryDependencies ++= Seq(
-      "org.slf4j"        % "slf4j-nop"                   % "2.0.17",
-      "dev.zio"         %% "zio"                         % "2.1.21",
-      "dev.zio"         %% "zio-interop-reactivestreams" % "2.0.2",
-      "io.github.vigoo" %% "desert-zio"                  % "0.3.6",
-      "io.github.vigoo" %% "desert-zio-schema"           % "0.3.6",
-
-      // redis
-      "io.lettuce" % "lettuce-core" % "6.8.1.RELEASE",
-
-      // raft
-      "io.microraft"                   % "microraft"     % "0.7",
-      "com.thesamet.scalapb.zio-grpc" %% "zio-grpc-core" % "0.6.3",
-      "org.apache.commons"             % "commons-lang3" % "3.18.0",
-
-      // test
-      "dev.zio" %% "zio-test"     % "2.1.21" % Test,
-      "dev.zio" %% "zio-test-sbt" % "2.1.21" % Test
     ),
     testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework")
   )
   .enablePlugins(JavaAppPackaging)
 
-Compile / PB.targets := Seq(
-  scalapb.gen(grpc = true)          -> (Compile / sourceManaged).value,
-  scalapb.zio_grpc.ZioCodeGenerator -> (Compile / sourceManaged).value
+//Compile / PB.targets := Seq(
+//  scalapb.gen(grpc = true)          -> (Compile / sourceManaged).value,
+//  scalapb.zio_grpc.ZioCodeGenerator -> (Compile / sourceManaged).value
+//)
+
+val testDeps = Seq(
+  "dev.zio" %% "zio-test"     % zio % Test,
+  "dev.zio" %% "zio-test-sbt" % zio % Test
 )
 
-libraryDependencies ++= Seq(
+val coreDeps = Seq(
+  "dev.zio"         %% "zio"                         % zio,
+  "dev.zio"         %% "zio-interop-reactivestreams" % "2.0.2",
+  "io.github.vigoo" %% "desert-zio"                  % "0.3.6",
+  "io.github.vigoo" %% "desert-zio-schema"           % "0.3.6"
+) ++ testDeps
+
+val redisDeps = Seq(
+  "io.lettuce" % "lettuce-core" % "6.8.1.RELEASE"
+) ++ testDeps
+
+val raftDeps = Seq(
+  "io.microraft"                   % "microraft"     % "0.7",
+  "com.thesamet.scalapb.zio-grpc" %% "zio-grpc-core" % "0.6.3",
+  "org.apache.commons"             % "commons-lang3" % "3.18.0",
+  "io.projectreactor"              % "reactor-core"  % "3.7.11",
+
+  // grpc
   "io.grpc"               % "grpc-netty"           % "1.75.0",
   "com.thesamet.scalapb" %% "scalapb-runtime-grpc" % scalapb.compiler.Version.scalapbVersion
+) ++ testDeps
+
+lazy val commonProtobufSettings = Seq(
+  Compile / PB.targets := Seq(
+    scalapb.gen(grpc = true)          -> (Compile / sourceManaged).value,
+    scalapb.zio_grpc.ZioCodeGenerator -> (Compile / sourceManaged).value
+  )
 )
+
+def module(id: String, path: String, description: String): Project =
+  Project(id, file(path))
+    .settings(moduleName := id, name := description)
+    .settings(testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework"))
+
+lazy val `core` = module("dref-core", "dref-core", "Core library")
+  .settings(libraryDependencies ++= coreDeps)
+
+lazy val example = module("example", "example", "Example app").dependsOn(`core`, raft)
+
+lazy val redis = module("dref-redis", "dref-redis", "Redis backend")
+  .dependsOn(`core`)
+  .settings(
+    libraryDependencies ++= redisDeps
+  )
+
+lazy val raft = module("dref-raft", "dref-raft", "Raft backend")
+  .dependsOn(`core`)
+  .settings(
+    libraryDependencies ++= raftDeps
+  )
+  .settings(commonProtobufSettings)
+
+
+
+aggregateProjects(`core`, redis, raft, example)
 
 // NativePackager settings
 enablePlugins(UniversalPlugin)
