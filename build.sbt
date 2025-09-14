@@ -1,17 +1,19 @@
 import scala.collection.Seq
 
-ThisBuild / version := "0.2.1"
+ThisBuild / version := "0.2.4"
 
 ThisBuild / scalaVersion := "3.5.2"
 
 ThisBuild / organization         := "io.github.tobia80"
 ThisBuild / organizationName     := "tobia80"
 ThisBuild / organizationHomepage := Some(url("https://tobia80.github.io"))
+ThisBuild / maintainer           := "tobia80"
 
 lazy val root = (project in file("."))
   .settings(
     name := "DRef",
     libraryDependencies ++= Seq(
+      "org.slf4j"        % "slf4j-nop"                   % "2.0.17",
       "dev.zio"         %% "zio"                         % "2.1.21",
       "dev.zio"         %% "zio-interop-reactivestreams" % "2.0.2",
       "io.github.vigoo" %% "desert-zio"                  % "0.3.6",
