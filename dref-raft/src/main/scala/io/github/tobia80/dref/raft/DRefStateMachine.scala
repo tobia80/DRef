@@ -1,7 +1,8 @@
 package io.github.tobia80.dref.raft
 
+import com.google.protobuf.ByteString
 import io.github.tobia80.dref.*
-import io.github.tobia80.raft.StartNewTermOpProto
+import io.github.tobia80.raft.{KVEntry, KVSnapshotChunkData, StartNewTermOpProto}
 import io.microraft.statemachine.StateMachine
 import reactor.core.publisher.Sinks
 
@@ -51,11 +52,27 @@ class DRefStateMachine(streamBuilder: Sinks.Many[ChangeEvent]) extends StateMach
     res
   }
 
-  override def takeSnapshot(commitIndex: Long, snapshotChunkConsumer: Consumer[AnyRef]): Unit =
-    throw new UnsupportedOperationException("Snapshots not supported")
+  import scala.jdk.CollectionConverters.*
 
-  override def installSnapshot(commitIndex: Long, snapshotChunks: util.List[AnyRef]): Unit =
-    throw new UnsupportedOperationException("Snapshots not supported")
+  override def takeSnapshot(commitIndex: Long, snapshotChunkConsumer: Consumer[AnyRef]): Unit = {
+    val values = for {
+      e      <- innerMap.toSet
+      kvEntry = KVEntry(e._1, ByteString.copyFrom(e._2))
+    } yield kvEntry
+    values.grouped(5).foreach { entry =>
+      val chunk = KVSnapshotChunkData(entry.toSeq)
+      snapshotChunkConsumer.accept(chunk)
+    }
+  }
+
+  override def installSnapshot(commitIndex: Long, snapshotChunks: util.List[AnyRef]): Unit = {
+    innerMap.clear()
+    val values = for {
+      chunk <- snapshotChunks.asScala
+      entry <- chunk.asInstanceOf[KVSnapshotChunkData].entry
+    } yield entry
+    values.foreach(entry => innerMap.put(entry.key, entry.value.toByteArray))
+  }
 
   override def getNewTermOperation: AnyRef = StartNewTermOpProto.defaultInstance
 }
