@@ -29,11 +29,13 @@ object IpProvider { // TODO use k8s to retrieve ips for one service
     }
   }
 
-  def dnsBased(service: String): ZLayer[Any, Nothing, IpProvider] = ZLayer.succeed {
+  def dnsBased(services: String*): ZLayer[Any, Nothing, IpProvider] = ZLayer.succeed {
     new IpProvider {
       override def findNodeAddresses(): Task[List[String]] = ZIO.attempt {
         import java.net.InetAddress
-        InetAddress.getAllByName(service).map(_.getHostAddress).toList
+        services.flatMap { service =>
+          InetAddress.getAllByName(service).map(_.getHostAddress)
+        }.toList
       }
 
       override def findMyAddress(): Task[String] = ZIO.attempt {

@@ -2,7 +2,7 @@ import Dependencies.zio
 
 import scala.collection.Seq
 
-ThisBuild / version := "0.2.4"
+ThisBuild / version := "0.3.0"
 
 ThisBuild / scalaVersion := "3.5.2"
 
@@ -19,11 +19,9 @@ lazy val root = (project in file("."))
     testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework")
   )
   .enablePlugins(JavaAppPackaging)
+  .settings(noPublishSettings)
 
-//Compile / PB.targets := Seq(
-//  scalapb.gen(grpc = true)          -> (Compile / sourceManaged).value,
-//  scalapb.zio_grpc.ZioCodeGenerator -> (Compile / sourceManaged).value
-//)
+lazy val noPublishSettings = Seq(publish := (()), publishLocal := (()), publishArtifact := false)
 
 val testDeps = Seq(
   "dev.zio" %% "zio-test"     % zio % Test,
@@ -67,7 +65,7 @@ def module(id: String, path: String, description: String): Project =
 lazy val `core` = module("dref-core", "dref-core", "Core library")
   .settings(libraryDependencies ++= coreDeps)
 
-lazy val example = module("example", "example", "Example app").dependsOn(`core`, raft)
+lazy val example = module("example", "example", "Example app").dependsOn(`core`, raft).settings(noPublishSettings)
 
 lazy val redis = module("dref-redis", "dref-redis", "Redis backend")
   .dependsOn(`core`)
@@ -82,9 +80,9 @@ lazy val raft = module("dref-raft", "dref-raft", "Raft backend")
   )
   .settings(commonProtobufSettings)
 
-
-
 aggregateProjects(`core`, redis, raft, example)
 
 // NativePackager settings
 enablePlugins(UniversalPlugin)
+
+publishTo := sonatypePublishToBundle.value

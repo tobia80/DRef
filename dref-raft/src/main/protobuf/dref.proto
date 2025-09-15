@@ -48,9 +48,6 @@ message SendCommandRequest {
 message SendCommandResponse {
 }
 
-message Event {
-  string id = 1;
-}
 
 
 service DRefRaft {
