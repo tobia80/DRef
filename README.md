@@ -15,8 +15,9 @@ It can be used to implement leader election, shard management, change notificati
 - Automatic optimisation of data (only diff are sent across the wire)
 - Highly configurable and extensible
 - Incredibly simple API similar to Ref
-- Synchronizes state across cluster nodes
-- Pluggable backend (e.g. Raft, Redis, in-memory, etc.)
+- Synchronizes backend across cluster nodes
+- Raft, Redis and In Memory implementations
+- Pluggable backends
 - Testable in ms
 
 ## Getting Started
