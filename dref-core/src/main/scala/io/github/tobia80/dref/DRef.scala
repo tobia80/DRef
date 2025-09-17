@@ -12,47 +12,47 @@ import scala.deriving.Mirror
 
 trait DRef[T] {
 
-  def get: RIO[DRefContext, T]
+  def get: Task[T]
 
-  def set(a: T): RIO[DRefContext, Unit]
+  def set(a: T): Task[Unit]
 
-  def setIfNotExist(a: T): RIO[DRefContext, Boolean]
+  def setIfNotExist(a: T): Task[Boolean]
 
-  def onChange[R](a: T => Task[R]): RIO[DRefContext, Unit]
+  def onChange[R](a: T => Task[R]): Task[Unit]
 
-  def changeStream: ZStream[DRefContext, Throwable, T]
+  def changeStream: ZStream[Any, Throwable, T]
 
-  def modify[B](f: T => (B, T)): RIO[DRefContext, B]
+  def modify[B](f: T => (B, T)): Task[B]
 
-  def modifyZIO[B, C](f: T => RIO[C, (B, T)]): RIO[DRefContext & C, B]
+  def modifyZIO[B, C](f: T => RIO[C, (B, T)]): RIO[C, B]
 
-  def getAndUpdate(f: T => T): RIO[DRefContext, T] =
+  def getAndUpdate(f: T => T): Task[T] =
     modify(v => (v, f(v)))
 
-  def update(f: T => T): RIO[DRefContext, Unit] =
+  def update(f: T => T): Task[Unit] =
     modify(v => ((), f(v)))
 
-  def updateAndGet(f: T => T): RIO[DRefContext, T] =
+  def updateAndGet(f: T => T): Task[T] =
     modify { v =>
       val result = f(v)
       (result, result)
     }
 
-  def getAndUpdateZIO[C](f: T => RIO[C, T]): RIO[DRefContext & C, T] =
+  def getAndUpdateZIO[C](f: T => RIO[C, T]): RIO[C, T] =
     modifyZIO { v =>
       for {
         result <- f(v)
       } yield (v, result)
     }
 
-  def updateZIO[C](f: T => RIO[C, T]): RIO[DRefContext & C, Unit] =
+  def updateZIO[C](f: T => RIO[C, T]): RIO[C, Unit] =
     modifyZIO { v =>
       for {
         result <- f(v)
       } yield ((), result)
     }
 
-  def updateAndGetZIO[C](f: T => RIO[C, T]): RIO[DRefContext & C, T] =
+  def updateAndGetZIO[C](f: T => RIO[C, T]): RIO[C, T] =
     modifyZIO { v =>
       for {
         result <- f(v)
@@ -140,9 +140,10 @@ object DRef {
       out.toString
     }
 
-  def lock[R, A, T](id: IdProvider = AutoId)(f: => RIO[R, T])(implicit trace: Trace): RIO[DRefContext & R, T] =
+  def lockWithContext[R, A, T](context: DRefContext, id: IdProvider = AutoId)(
+    f: => RIO[R, T]
+  )(implicit trace: Trace): RIO[R, T] =
     for {
-      context    <- ZIO.service[DRefContext]
       stack      <- ZIO.stackTrace
       hash       <- sha(stack.prettyPrint)
       traceInfo  <-
@@ -161,7 +162,7 @@ object DRef {
       interruptStream      <- Promise.make[Throwable, Unit]
       aliveInterruptStream <- Promise.make[Throwable, Unit]
       aliveFiber           <- context.keepAliveStream(name).interruptWhen(aliveInterruptStream).runDrain.fork
-      _                    <- context // attempt to gain lock when delete element happen, if not keep listening otherwise terminate stream
+      _                    <- context // attempt to gain lock when delete element happens, if not keep listening otherwise terminate stream
                                 .onChangeStream(name)
                                 .interruptWhen(interruptStream)
                                 .collectZIO { case DeleteElement(name) =>
@@ -180,6 +181,9 @@ object DRef {
                                     .ignore
                               }
     } yield result
+
+  def lock[R, A, T](id: IdProvider = AutoId)(f: => RIO[R, T])(implicit trace: Trace): RIO[DRefContext & R, T] =
+    ZIO.serviceWithZIO[DRefContext](context => lockWithContext(context, id)(f))
 
   def make[T: BinaryCodec](a: => T, id: IdProvider = AutoId)(implicit trace: Trace): RIO[DRefContext, DRef[T]] =
     for {
@@ -207,7 +211,7 @@ case class ManualId(value: String) extends IdProvider
 
 class DRefImpl[T: BinaryCodec](context: DRefContext)(name: String) extends DRef[T] {
 
-  override def get: RIO[DRefContext, T] = {
+  override def get: Task[T] = {
     val result: Task[Option[Array[Byte]]] = context.getElement(name)
     result.flatMap {
       case Some(bytes) =>
@@ -216,25 +220,25 @@ class DRefImpl[T: BinaryCodec](context: DRefContext)(name: String) extends DRef[
     }
   }
 
-  override def set(a: T): RIO[DRefContext, Unit] = fromEither(serializeToArray(a))
+  override def set(a: T): Task[Unit] = fromEither(serializeToArray(a))
     .mapError(failure => new Throwable(failure.message))
     .flatMap(context.setElement(name, _))
 
-  override def onChange[R](a: T => Task[R]): RIO[DRefContext, Unit] = changeStream.foreach(a).fork.unit
+  override def onChange[R](a: T => Task[R]): Task[Unit] = changeStream.foreach(a).fork.unit
 
-  override def changeStream: ZStream[DRefContext, Throwable, T] =
+  override def changeStream: ZStream[Any, Throwable, T] =
     context.onChangeStream(name).collectZIO { case SetElement(_, elementValue) =>
       val value = deserializeFromArray[T](elementValue)
       fromEither(value).mapError(failure => new Throwable(failure.message))
     }
 
-  override def setIfNotExist(a: T): RIO[DRefContext, Boolean] =
+  override def setIfNotExist(a: T): Task[Boolean] =
     fromEither(serializeToArray(a))
       .mapError(failure => new Throwable(failure.message))
       .flatMap(context.setElementIfNotExist(name, _))
 
-  override def modify[B](f: T => (B, T)): RIO[DRefContext, B] =
-    DRef.lock(ManualId(s"lock:$name")) {
+  override def modify[B](f: T => (B, T)): Task[B] =
+    DRef.lockWithContext(context, ManualId(s"lock:$name")) {
       for {
         current      <- get
         (b, newValue) = f(current)
@@ -242,8 +246,8 @@ class DRefImpl[T: BinaryCodec](context: DRefContext)(name: String) extends DRef[
       } yield b
     }
 
-  override def modifyZIO[B, C](f: T => RIO[C, (B, T)]): RIO[DRefContext & C, B] =
-    DRef.lock(ManualId(s"lock:$name")) {
+  override def modifyZIO[B, C](f: T => RIO[C, (B, T)]): RIO[C, B] =
+    DRef.lockWithContext(context, ManualId(s"lock:$name")) {
       for {
         current       <- get
         (b, newValue) <- f(current)
