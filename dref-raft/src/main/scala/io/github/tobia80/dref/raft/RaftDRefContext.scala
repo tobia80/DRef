@@ -10,10 +10,11 @@ import reactor.core.publisher.Sinks
 import scalapb.zio_grpc.{ServerLayer, ServiceList, ZManagedChannel}
 import zio.interop.reactivestreams.*
 import zio.stream.{Take, ZStream}
-import zio.{Hub, Promise, Ref, Runtime, Schedule, Scope, Task, URIO, Unsafe, ZIO, ZLayer, durationInt, *}
+import zio.{durationInt, Hub, Promise, Ref, Runtime, Schedule, Scope, Task, URIO, Unsafe, ZIO, ZLayer, *}
 
 case class RaftConfig(port: Int, addressPollInterval: Duration = 3.seconds, connectionTimeout: Duration = 5.seconds)
 
+//TODO how to listen for when payload is stabilised in the raft log?
 object RaftDRefContext {
 
   import scala.jdk.CollectionConverters.*

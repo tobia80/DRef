@@ -38,9 +38,13 @@ class DRefStateMachine(streamBuilder: Sinks.Many[ChangeEvent]) extends StateMach
 
   private def setElementIfNotExist(commitIndex: Long, operation: SetElementIfNotExistRequest): AnyRef = {
     val res = innerMap.get(operation.name)
-    innerMap.put(operation.name, operation.value.toByteArray)
-    streamBuilder.tryEmitNext(SetElement(operation.name, operation.value.toByteArray)).orThrow()
-    java.lang.Boolean.valueOf(res.isEmpty) // if not exist set to true
+    res match {
+      case Some(value) => java.lang.Boolean.FALSE
+      case None        =>
+        innerMap.put(operation.name, operation.value.toByteArray)
+        streamBuilder.tryEmitNext(SetElement(operation.name, operation.value.toByteArray)).orThrow()
+        java.lang.Boolean.TRUE
+    }
   }
 
   private def getElement(commitIndex: Long, operation: GetElementRequest): Option[Array[Byte]] =

@@ -6,7 +6,7 @@ import zio.ZIO.fromEither
 import zio.internal.stacktracer.Tracer.*
 import zio.schema.{DeriveSchema, Schema}
 import zio.stream.ZStream
-import zio.{durationInt, Promise, Queue, RIO, Random, Ref, Schedule, Task, Trace, UIO, ULayer, ZIO, ZLayer}
+import zio.{Promise, Queue, RIO, Random, Ref, Task, Trace, ULayer, ZIO, ZLayer}
 
 import scala.deriving.Mirror
 
