@@ -12,6 +12,7 @@ message StartNewTermOpProto {
 message KVEntry {
   string key = 1;
   bytes value = 2;
+  optional uint64 expireAt = 3;
 }
 
 message KVSnapshotChunkData {

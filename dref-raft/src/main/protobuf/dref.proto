@@ -10,16 +10,28 @@ message EndpointResponse {
 message GetEndpointsRequest {
 }
 
+message GetExpirationTableRequest {
+}
+
+message ExpireElementRequest {
+  string id = 1;
+  string name = 2;
+  uint64 expireAt = 3;
+}
+message ExpireElementResponse {}
+
 message SetElementRequest {
   string id = 1;
   string name = 2;
   bytes value = 3;
+  optional uint64 expireAt = 4;
 }
 message SetElementResponse {}
 message SetElementIfNotExistRequest {
   string id = 1;
   string name = 2;
   bytes value = 3;
+  optional uint64 expireAt = 4;
 }
 message SetElementIfNotExistResponse {
   bool created = 1;
@@ -53,6 +65,7 @@ message SendCommandResponse {
 service DRefRaft {
 
   rpc SetElement(SetElementRequest) returns (SetElementResponse) {}
+  rpc ExpireElement(ExpireElementRequest) returns (ExpireElementResponse) {}
   rpc SetElementIfNotExist(SetElementIfNotExistRequest) returns (SetElementIfNotExistResponse) {}
   rpc GetElement(GetElementRequest) returns (GetElementResponse) {}
   rpc DeleteElement(DeleteElementRequest) returns (DeleteElementResponse) {}

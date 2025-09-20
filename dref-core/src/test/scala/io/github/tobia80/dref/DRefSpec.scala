@@ -43,5 +43,5 @@ object DRefSpec extends ZIOSpecDefault {
         valueWithTwoLocks <- list.get
       } yield assertTrue(valueWithOneLock == List(100) && valueWithTwoLocks == List(100, 200))
     } @@ TestAspect.withLiveClock
-  ).provide(DRefContext.local)
+  ).provideSome[Scope](DRefContext.local)
 }

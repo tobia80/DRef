@@ -17,7 +17,7 @@ case class RedisConfig(
   username: Option[String],
   password: Option[String],
   caCert: Option[String],
-  ttl: Option[FiniteDuration]
+  ttl: Option[Duration]
 ) {
 
   def toRedisURI: String = {
@@ -72,7 +72,6 @@ object RedisDRefContext {
       config           <- ZIO.service[RedisConfig]
       redisClient      <- RedisClient.make(config)
       redisSubscription = redisClient.subscribe(channel)
-      ttl               = config.ttl
       hub              <- Hub.bounded[Take[Throwable, ChangePayload]](64)
       _                <- redisSubscription
                             .mapZIO { value =>
@@ -92,7 +91,9 @@ object RedisDRefContext {
     } yield new DRefContext {
       private def publish(message: Chunk[Byte]) = redisClient.publish(channel, message)
 
-      override def setElement(name: String, a: Array[Byte]): Task[Unit] = {
+      override def defaultTtl: Duration = config.ttl.getOrElse(20.seconds)
+
+      override def setElement(name: String, a: Array[Byte], ttl: Option[Duration]): Task[Unit] = {
         val change = ChangePayload(name = Chunk.fromArray(name.getBytes), value = Chunk.fromArray(a))
         val result: Either[DesertFailure, Array[Byte]] = serializeToArray[ChangePayload](change)
         result match {
@@ -119,23 +120,22 @@ object RedisDRefContext {
       }
 
       import zio.Duration
-      override def keepAliveStream(name: String): ZStream[Any, Throwable, Unit] =
-        ttl.fold(ZStream.empty)(ttlValue =>
-          val ttlZio = Duration.fromScala(ttlValue / 1.25)
-          ZStream.repeatZIOWithSchedule(keepAlive(name), Schedule.fixed(ttlZio))
-        )
+      override def keepAliveStream(name: String, ttl: Duration): ZStream[Any, Throwable, Unit] = {
+        val ttlZio = Duration.fromScala(ttl.asFiniteDuration / 1.25)
+        ZStream.repeatZIOWithSchedule(keepAlive(name, ttl), Schedule.fixed(ttlZio))
+      }
 
-      private def keepAlive(name: String): Task[Unit] =
-        ttl.fold(ZIO.unit)(ttlValue => redisClient.expire(Chunk.fromArray(name.getBytes), ttlValue).unit)
+      private def keepAlive(name: String, ttl: Duration): Task[Unit] =
+         redisClient.expire(Chunk.fromArray(name.getBytes), ttl).unit
 
-      override def setElementIfNotExist(name: String, value: Array[Byte]): Task[Boolean] = {
+      override def setElementIfNotExist(name: String, value: Array[Byte], ttl: Option[Duration]): Task[Boolean] = {
         val change = ChangePayload(name = Chunk.fromArray(name.getBytes), value = Chunk.fromArray(value))
         val result: Either[DesertFailure, Array[Byte]] = serializeToArray[ChangePayload](change)
         result match {
           case Right(value) =>
             for {
               result <- redisClient.setNx(Chunk.fromArray(name.getBytes), Chunk.fromArray(value))
-              _      <- keepAlive(name).when(result)
+              _      <- ttl.fold(ZIO.unit)(keepAlive(name, _)).when(result)
               _      <- publish(Chunk.fromArray(value)).when(result)
             } yield result
           case Left(error)  => ZIO.fail(new Exception(s"Cannot serialize notification ($change) (Error: $error)"))
