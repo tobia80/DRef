@@ -129,25 +129,21 @@ object RaftDRefContext {
       elementsToDelete       = expirationMapResponse.getResult.collect {
                                  case (name, time) if time < now => name
                                }.toList
-      _                     <- ZIO.logInfo(s"Expiring elements $elementsToDelete")
+      _                     <- ZIO.logInfo(s"Expiring elements $elementsToDelete").when(elementsToDelete.nonEmpty)
       _                     <-
         ZIO
           .foreach(elementsToDelete)(name => ZIO.fromCompletionStage(leaderNode.replicate(DeleteElementRequest(name))))
           .ignore
     } yield ()
 
-  private def removingExpiringElementsStream(paused: Ref[Boolean], myNodes: Ref[Map[String, NodeDescriptor]]) =
+  private def removingExpiringElementsStream(myNodes: Ref[Map[String, NodeDescriptor]]) =
     ZStream
       .repeatZIOWithSchedule(
-        paused.get.flatMap {
-          case false =>
-            findMyLeaderNode(myNodes).flatMap {
-              case Some(leaderNode) => ZIO.logInfo("Expiring elements check") *> expireElements(leaderNode)
-              case None             => ZIO.unit
-            }
-          case true  => ZIO.unit // Yields nothing, will retry on next pull
+        findMyLeaderNode(myNodes).flatMap {
+          case Some(leaderNode) => expireElements(leaderNode)
+          case None             => ZIO.unit
         },
-        Schedule.spaced(300.millis)
+        Schedule.spaced(100.millis)
       )
       .runDrain
       .forkScoped
@@ -170,6 +166,7 @@ object RaftDRefContext {
     myNodes              <- Ref.make[Map[String, NodeDescriptor]](
                               Map.empty
                             )
+    _                    <- removingExpiringElementsStream(myNodes)
     drefServer            = DRefGrpcServer(myNodes, endpointsOnThisJvm)
     builder               = ServerBuilder.forPort(config.port).addService(ProtoReflectionService.newInstance())
     services              = ServiceList.add(drefServer)
@@ -207,7 +204,12 @@ object RaftDRefContext {
                                            _                   <- ZIO.logInfo(s"Finished leader discovery ${leaderNodeHereMaybe.map(_.getLocalEndpoint)}")
                                            _                   <- leaderNodeHereMaybe match {
                                                                     case Some(leaderHere) =>
-                                                                      propagateMembership(leaderHere, endpoints, additions, removals) // propagate changes
+                                                                      propagateMembership(
+                                                                        leaderHere,
+                                                                        endpoints,
+                                                                        additions,
+                                                                        removals
+                                                                      ) // propagate changes
                                                                     case None             => ZIO.unit
                                                                   }
                                            _                   <- ZIO.logInfo("Finished propagation")
