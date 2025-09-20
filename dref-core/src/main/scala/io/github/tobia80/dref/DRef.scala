@@ -6,8 +6,27 @@ import zio.ZIO.fromEither
 import zio.internal.stacktracer.Tracer.*
 import zio.schema.{DeriveSchema, Schema}
 import zio.stream.ZStream
-import zio.{Promise, Queue, RIO, Random, Ref, Task, Trace, ULayer, ZIO, ZLayer}
+import zio.{
+  duration2DurationOps,
+  durationInt,
+  Chunk,
+  Clock,
+  Duration,
+  Promise,
+  Queue,
+  RIO,
+  Random,
+  Ref,
+  Schedule,
+  Scope,
+  Task,
+  Trace,
+  ULayer,
+  ZIO,
+  ZLayer
+}
 
+import java.util.concurrent.TimeUnit
 import scala.deriving.Mirror
 
 trait DRef[T] {
@@ -63,11 +82,13 @@ trait DRef[T] {
 
 trait DRefContext {
 
-  def setElement(name: String, value: Array[Byte]): Task[Unit]
+  def defaultTtl: Duration
 
-  def setElementIfNotExist(name: String, value: Array[Byte]): Task[Boolean]
+  def setElement(name: String, value: Array[Byte], ttl: Option[Duration]): Task[Unit]
 
-  def keepAliveStream(name: String): ZStream[Any, Throwable, Unit]
+  def setElementIfNotExist(name: String, value: Array[Byte], ttl: Option[Duration]): Task[Boolean]
+
+  def keepAliveStream(name: String, ttl: Duration): ZStream[Any, Throwable, Unit]
 
   def getElement(name: String): Task[Option[Array[Byte]]]
 
@@ -84,37 +105,76 @@ sealed trait ChangeEvent {
 case class SetElement(name: String, value: Array[Byte]) extends ChangeEvent
 case class DeleteElement(name: String) extends ChangeEvent
 
+private case class ExpiringValue(value: Array[Byte], expireAt: Option[Long])
+
 object DRefContext {
 
-  val local: ULayer[DRefContext] = ZLayer(for {
-    ref     <- Ref.make[Map[String, Array[Byte]]](Map.empty)
+  private def removeExpiredElements(ref: Ref[Map[String, ExpiringValue]]): ZIO[Any, Nothing, Unit] =
+    for {
+      now <- Clock.currentTime(TimeUnit.MILLISECONDS)
+      _   <- ref.update { old =>
+               old.filter { case (_, v) =>
+                 v.expireAt.forall(_ > now)
+               }
+             }
+    } yield ()
+
+  val local: ZLayer[Scope, Nothing, DRefContext] = ZLayer(for {
+    ref     <- Ref.make[Map[String, ExpiringValue]](Map.empty)
     changes <- Queue.sliding[ChangeEvent](2)
+    _       <- removeExpiredElements(ref)
+                 .repeat(Schedule.fixed(200.millis))
+                 .forkScoped
   } yield new DRefContext {
 
-    override def setElement(name: String, value: Array[Byte]): Task[Unit] = ref.update { el =>
-      el.updated(name, value)
-    } *> changes.offer(SetElement(name, value)).unit
+    override def setElement(name: String, value: Array[Byte], ttl: Option[Duration]): Task[Unit] =
+      Clock.currentTime(TimeUnit.MILLISECONDS).flatMap { now =>
+        val expireAt = ttl.map(t => now + t.toMillis)
+        ref.update { el =>
+          el.updated(name, ExpiringValue(value, expireAt))
+        } *> changes.offer(SetElement(name, value)).unit
+      }
 
     override def getElement(name: String): Task[Option[Array[Byte]]] =
-      ref.get.map(_.get(name))
+      ref.get.map(_.get(name).map(_.value))
 
-    override def keepAliveStream(name: String): ZStream[Any, Throwable, Unit] = ZStream.empty
+    override def keepAliveStream(name: String, ttl: Duration): ZStream[Any, Throwable, Unit] = {
+      val ttlZio = Duration.fromScala(ttl.asFiniteDuration / 1.25)
+      ZStream.repeatZIOWithSchedule(keepAlive(name, ttl), Schedule.fixed(ttlZio))
+    }
+
+    private def keepAlive(name: String, ttl: Duration): Task[Unit] =
+      Clock.currentTime(TimeUnit.MILLISECONDS).flatMap { now =>
+        ref.update { old =>
+          old.get(name) match {
+            case Some(value) =>
+              old.updated(name, value.copy(expireAt = Some(now + ttl.toMillis)))
+            case None        => old
+          }
+        }
+      }
 
     override def onChangeStream(name: String): ZStream[Any, Throwable, ChangeEvent] =
       ZStream.fromQueue(changes).filter(_.name == name)
 
-    override def setElementIfNotExist(name: String, value: Array[Byte]): Task[Boolean] = ref
-      .modify { el =>
-        val contains = el.contains(name)
-        if !contains then true -> el.updated(name, value)
-        else false             -> el
-      }
-      .tap(result => changes.offer(SetElement(name, value)).when(result))
+    override def setElementIfNotExist(name: String, value: Array[Byte], ttl: Option[Duration]): Task[Boolean] =
+      Clock
+        .currentTime(TimeUnit.MILLISECONDS)
+        .flatMap(now =>
+          ref
+            .modify { el =>
+              val contains = el.contains(name)
+              if !contains then true -> el.updated(name, ExpiringValue(value, ttl.map(t => now + t.toMillis)))
+              else false             -> el
+            }
+            .tap(result => changes.offer(SetElement(name, value)).when(result))
+        )
 
     override def deleteElement(name: String): Task[Unit] = ref.update { el =>
       el.removed(name)
     } *> changes.offer(DeleteElement(name)).unit
 
+    override def defaultTtl: Duration = 5.seconds
   })
 }
 
@@ -157,17 +217,18 @@ object DRef {
                       case AutoId       => s"$location:$file:$line ($hash)"
                       case ManualId(id) => id
                     }
-      gainedLock <- context.setElementIfNotExist(name, bytes)
+      defaultTtl  = context.defaultTtl
+      gainedLock <- context.setElementIfNotExist(name, bytes, Some(defaultTtl))
 
       interruptStream      <- Promise.make[Throwable, Unit]
       aliveInterruptStream <- Promise.make[Throwable, Unit]
-      aliveFiber           <- context.keepAliveStream(name).interruptWhen(aliveInterruptStream).runDrain.fork
+      aliveFiber           <- context.keepAliveStream(name, defaultTtl).interruptWhen(aliveInterruptStream).runDrain.fork
       _                    <- context // attempt to gain lock when delete element happens, if not keep listening otherwise terminate stream
                                 .onChangeStream(name)
                                 .interruptWhen(interruptStream)
                                 .collectZIO { case DeleteElement(name) =>
                                   for {
-                                    lockedGain <- context.setElementIfNotExist(name, bytes)
+                                    lockedGain <- context.setElementIfNotExist(name, bytes, Some(defaultTtl))
                                     _          <- interruptStream.succeed(()).when(lockedGain)
                                   } yield ()
                                 }
@@ -200,7 +261,7 @@ object DRef {
                      case AutoId       => s"$location:$file:$line ($hash)"
                      case ManualId(id) => id
                    }
-      _         <- context.setElementIfNotExist(name, bytes)
+      _         <- context.setElementIfNotExist(name, bytes, None)
     } yield new DRefImpl[T](context)(name)
 }
 
@@ -222,7 +283,7 @@ class DRefImpl[T: BinaryCodec](context: DRefContext)(name: String) extends DRef[
 
   override def set(a: T): Task[Unit] = fromEither(serializeToArray(a))
     .mapError(failure => new Throwable(failure.message))
-    .flatMap(context.setElement(name, _))
+    .flatMap(context.setElement(name, _, None))
 
   override def onChange[R](a: T => Task[R]): Task[Unit] = changeStream.foreach(a).fork.unit
 
@@ -235,7 +296,7 @@ class DRefImpl[T: BinaryCodec](context: DRefContext)(name: String) extends DRef[
   override def setIfNotExist(a: T): Task[Boolean] =
     fromEither(serializeToArray(a))
       .mapError(failure => new Throwable(failure.message))
-      .flatMap(context.setElementIfNotExist(name, _))
+      .flatMap(context.setElementIfNotExist(name, _, None))
 
   override def modify[B](f: T => (B, T)): Task[B] =
     DRef.lockWithContext(context, ManualId(s"lock:$name")) {

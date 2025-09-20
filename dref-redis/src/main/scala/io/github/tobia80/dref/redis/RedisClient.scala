@@ -14,7 +14,7 @@ import scala.concurrent.duration.FiniteDuration
 
 trait RedisClient {
 
-  def set(name: Chunk[Byte], value: Chunk[Byte], ttl: Option[FiniteDuration]): Task[String]
+  def set(name: Chunk[Byte], value: Chunk[Byte], ttl: Option[Duration]): Task[String]
 
   def setNx(name: Chunk[Byte], value: Chunk[Byte]): Task[Boolean]
 
@@ -22,7 +22,7 @@ trait RedisClient {
 
   def del(name: Chunk[Byte]): Task[Long]
 
-  def expire(name: Chunk[Byte], ttl: FiniteDuration): Task[Boolean]
+  def expire(name: Chunk[Byte], ttl: Duration): Task[Boolean]
 
   def publish(channel: Chunk[Byte], message: Chunk[Byte]): Task[Long]
 
@@ -53,7 +53,7 @@ class LettuceRedisClient(
 
   import scala.language.implicitConversions
 
-  override def set(name: Chunk[Byte], value: Chunk[Byte], ttl: Option[FiniteDuration]): Task[String] = ZIO
+  override def set(name: Chunk[Byte], value: Chunk[Byte], ttl: Option[Duration]): Task[String] = ZIO
     .fromCompletionStage(
       ttl
         .fold(async.set(name.toArray, value.toArray))(ttlValue =>
@@ -69,7 +69,7 @@ class LettuceRedisClient(
 
   override def del(name: Chunk[Byte]): Task[Long] = ZIO.fromCompletionStage(async.del(name.toArray)).map(_.longValue())
 
-  override def expire(name: Chunk[Byte], ttl: FiniteDuration): Task[Boolean] =
+  override def expire(name: Chunk[Byte], ttl: Duration): Task[Boolean] =
     ZIO.fromCompletionStage(async.expire(name.toArray, ttl.toSeconds)).map(_.booleanValue())
 
   override def publish(channel: Chunk[Byte], message: Chunk[Byte]): Task[Long] =

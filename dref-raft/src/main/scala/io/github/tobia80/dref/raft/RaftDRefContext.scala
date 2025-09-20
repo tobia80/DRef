@@ -1,18 +1,26 @@
 package io.github.tobia80.dref.raft
 
 import io.github.tobia80.dref.ZioDref.DRefRaftClient
-import io.github.tobia80.dref.{ChangeEvent, DRefContext}
+import io.github.tobia80.dref.{ChangeEvent, DRefContext, DeleteElementRequest, GetExpirationTableRequest}
 import io.grpc.ServerBuilder
 import io.grpc.netty.NettyChannelBuilder
 import io.grpc.protobuf.services.ProtoReflectionService
-import io.microraft.{MembershipChangeMode, RaftEndpoint, RaftNode}
+import io.microraft.{MembershipChangeMode, QueryPolicy, RaftEndpoint, RaftNode}
 import reactor.core.publisher.Sinks
 import scalapb.zio_grpc.{ServerLayer, ServiceList, ZManagedChannel}
 import zio.interop.reactivestreams.*
 import zio.stream.{Take, ZStream}
 import zio.{durationInt, Hub, Promise, Ref, Runtime, Schedule, Scope, Task, URIO, Unsafe, ZIO, ZLayer, *}
 
-case class RaftConfig(port: Int, addressPollInterval: Duration = 3.seconds, connectionTimeout: Duration = 5.seconds)
+import java.util.Optional
+import java.util.concurrent.TimeUnit
+
+case class RaftConfig(
+  port: Int,
+  ttl: Option[Duration] = Some(10.seconds),
+  addressPollInterval: Duration = 3.seconds,
+  connectionTimeout: Duration = 5.seconds
+)
 
 //TODO how to listen for when payload is stabilised in the raft log?
 object RaftDRefContext {
@@ -47,7 +55,7 @@ object RaftDRefContext {
       ZManagedChannel(NettyChannelBuilder.forAddress(address, port).usePlaintext())
     )
 
-  private def findLeaderNode(myNodes: Ref[Map[String, NodeDescriptor]]): Task[Option[RaftNode]] =
+  private def findMyLeaderNode(myNodes: Ref[Map[String, NodeDescriptor]]): Task[Option[RaftNode]] =
     myNodes.get.map { nodeMap =>
       nodeMap.values.find(el => el.node.getTerm.getLeaderEndpoint.getId == el.id).map(_.node)
     }
@@ -107,10 +115,48 @@ object RaftDRefContext {
     ZIO.collectAll(addTasks ++ removeTasks).unit
   }
 
+  private def expireElements(leaderNode: RaftNode): ZIO[Any, Throwable, Unit] =
+    for {
+      now                   <- Clock.currentTime(TimeUnit.MILLISECONDS)
+      expirationMapResponse <- ZIO.fromCompletionStage(
+                                 leaderNode.query[Map[String, Long]](
+                                   GetExpirationTableRequest(),
+                                   QueryPolicy.EVENTUAL_CONSISTENCY,
+                                   Optional.empty[java.lang.Long](),
+                                   Optional.empty[java.time.Duration]()
+                                 )
+                               )
+      elementsToDelete       = expirationMapResponse.getResult.collect {
+                                 case (name, time) if time < now => name
+                               }.toList
+      _                     <- ZIO.logInfo(s"Expiring elements $elementsToDelete")
+      _                     <-
+        ZIO
+          .foreach(elementsToDelete)(name => ZIO.fromCompletionStage(leaderNode.replicate(DeleteElementRequest(name))))
+          .ignore
+    } yield ()
+
+  private def removingExpiringElementsStream(paused: Ref[Boolean], myNodes: Ref[Map[String, NodeDescriptor]]) =
+    ZStream
+      .repeatZIOWithSchedule(
+        paused.get.flatMap {
+          case false =>
+            findMyLeaderNode(myNodes).flatMap {
+              case Some(leaderNode) => ZIO.logInfo("Expiring elements check") *> expireElements(leaderNode)
+              case None             => ZIO.unit
+            }
+          case true  => ZIO.unit // Yields nothing, will retry on next pull
+        },
+        Schedule.spaced(300.millis)
+      )
+      .runDrain
+      .forkScoped
+
   val live: ZLayer[IpProvider & RaftConfig & Scope, Throwable, RaftDRefContext] = ZLayer(for {
     config               <- ZIO.service[RaftConfig]
     ipProvider           <- ZIO.service[IpProvider]
     runtime              <- ZIO.runtime[Any]
+    ttl                   = config.ttl
     myIp                 <- ipProvider.findMyAddress()
     id                   <- ZIO.randomWith(_.nextLongBetween(0, 99999)).map(_.toString)
     myEndpoint            = Endpoint(id, myIp)
@@ -157,7 +203,7 @@ object RaftDRefContext {
                                                                     inner.values.map(_.updateEndpoints(endpointClientMap))
                                                                   } // update all the transports not only mine
                                            _                   <- ZIO.logInfo("Finding leader")
-                                           leaderNodeHereMaybe <- findLeaderNode(myNodes)
+                                           leaderNodeHereMaybe <- findMyLeaderNode(myNodes)
                                            _                   <- ZIO.logInfo(s"Finished leader discovery ${leaderNodeHereMaybe.map(_.getLocalEndpoint)}")
                                            _                   <- leaderNodeHereMaybe match {
                                                                     case Some(leaderHere) =>
@@ -200,20 +246,33 @@ object RaftDRefContext {
         }
       )
 
-    override def setElement(name: String, value: Array[Byte]): Task[Unit] =
+    override def setElement(name: String, value: Array[Byte], ttl: Option[Duration]): Task[Unit] =
       retryOnLeaderException(
         leaderEndpoint(myNode)
           .flatMap { leaderEndpoint =>
-            grpcClient.setElement(leaderEndpoint, name, value) // What if not leader from server? repeat until success?
+            grpcClient.setElement(
+              leaderEndpoint,
+              name,
+              value,
+              ttl
+            ) // What if not leader from server? repeat until success?
           }
       )
 
-    override def setElementIfNotExist(name: String, value: Array[Byte]): Task[Boolean] =
+    override def setElementIfNotExist(name: String, value: Array[Byte], ttl: Option[Duration]): Task[Boolean] =
       retryOnLeaderException(leaderEndpoint(myNode).flatMap { leaderEndpoint =>
-        grpcClient.setElementIfNotExist(leaderEndpoint, name, value)
+        grpcClient.setElementIfNotExist(leaderEndpoint, name, value, ttl)
       })
 
-    override def keepAliveStream(name: String): ZStream[Any, Throwable, Unit] = ZStream.empty
+    override def keepAliveStream(name: String, ttl: Duration): ZStream[Any, Throwable, Unit] = {
+      val ttlZio = Duration.fromScala(ttl.asFiniteDuration / 1.25)
+      ZStream.repeatZIOWithSchedule(keepAlive(name, ttl), Schedule.fixed(ttlZio))
+    }
+
+    private def keepAlive(name: String, ttl: Duration): Task[Unit] =
+      retryOnLeaderException(leaderEndpoint(myNode).flatMap { leaderEndpoint =>
+        grpcClient.expireElement(leaderEndpoint, name, ttl)
+      })
 
     override def getElement(name: String): Task[Option[Array[Byte]]] =
       retryOnLeaderException(leaderEndpoint(myNode).flatMap { leaderEndpoint =>
@@ -257,5 +316,7 @@ object RaftDRefContext {
       _ <- myNodes.update(old => old - nodeId)
       _ <- endpointsOnThisJvm.update(old => old.filterNot(_.getId == nodeId))
     } yield ()
+
+    override def defaultTtl: Duration = config.ttl.getOrElse(20.seconds)
   })
 }

@@ -6,6 +6,8 @@ trait IpProvider {
   def findNodeAddresses(): Task[List[String]]
 
   def findMyAddress(): Task[String]
+
+  def expectedEndpoints: Task[Int]
 }
 
 object IpProvider { // TODO use k8s to retrieve ips for one service
@@ -15,6 +17,8 @@ object IpProvider { // TODO use k8s to retrieve ips for one service
       override def findNodeAddresses(): Task[List[String]] = ZIO.succeed(List("127.0.0.1"))
 
       override def findMyAddress(): Task[String] = ZIO.succeed("127.0.0.1")
+
+      override def expectedEndpoints: Task[Int] = ZIO.succeed(1)
     }
   }
 
@@ -26,6 +30,8 @@ object IpProvider { // TODO use k8s to retrieve ips for one service
         import java.net.InetAddress
         InetAddress.getLocalHost.getHostAddress
       }
+
+      override def expectedEndpoints: Task[Int] = ZIO.succeed(ips.size)
     }
   }
 
@@ -42,6 +48,8 @@ object IpProvider { // TODO use k8s to retrieve ips for one service
         import java.net.InetAddress
         InetAddress.getLocalHost.getHostAddress
       }
+
+      override def expectedEndpoints: Task[Int] = findNodeAddresses().map(_.size)
     }
   }
 

@@ -56,7 +56,7 @@ object RedisDRefSpec extends ZIOSpecDefault {
         username = None,
         password = None,
         caCert = None,
-        ttl = Some(5.seconds.asFiniteDuration)
+        ttl = Some(5.seconds)
       )
     )
   ) @@ TestAspect.debug
