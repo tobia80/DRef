@@ -146,7 +146,7 @@ object RedisDRefContext {
         redisClient.get(Chunk.fromArray(name.getBytes)).map(_.map(_.toArray))
 
       override def onChangeStream(name: String): ZStream[Any, Throwable, ChangeEvent] =
-        ZStream.logInfo(s"Subscribing to $name") *> ZStream.fromHub(hub).flattenTake.collect {
+        ZStream.logDebug(s"Subscribing to $name") *> ZStream.fromHub(hub).flattenTake.collect {
           case c @ ChangePayload(_, value, false) if c.nameString == name => SetElement(name, value.toArray)
           case c @ ChangePayload(_, value, true) if c.nameString == name  => DeleteElement(name)
         }

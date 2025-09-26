@@ -204,41 +204,45 @@ object DRef {
     f: => RIO[R, T]
   )(implicit trace: Trace): RIO[R, T] =
     for {
-      stack      <- ZIO.stackTrace
-      hash       <- sha(stack.prettyPrint)
-      traceInfo  <-
+      stack                <- ZIO.stackTrace
+      hash                 <- sha(stack.prettyPrint)
+      traceInfo            <-
         ZIO.fromOption(instance.unapply(trace)).orElseFail(new Throwable("No trace available"))
-      a          <- Random.nextLong
-      bytes      <- fromEither(serializeToArray(a)).mapError(failure => new Throwable(failure.message))
-      location    = traceInfo._1
-      file        = traceInfo._2
-      line        = traceInfo._3
-      name        = id match {
-                      case AutoId       => s"$location:$file:$line ($hash)"
-                      case ManualId(id) => id
-                    }
-      defaultTtl  = context.defaultTtl
-      gainedLock <- context.setElementIfNotExist(name, bytes, Some(defaultTtl))
-
+      a                    <- Random.nextLong
+      bytes                <- fromEither(serializeToArray(a)).mapError(failure => new Throwable(failure.message))
+      location              = traceInfo._1
+      file                  = traceInfo._2
+      line                  = traceInfo._3
+      name                  = id match {
+                                case AutoId       => s"$location:$file:$line ($hash)"
+                                case ManualId(id) => id
+                              }
+      defaultTtl            = context.defaultTtl
+      gainedLock           <- context.setElementIfNotExist(name, bytes, Some(defaultTtl))
       interruptStream      <- Promise.make[Throwable, Unit]
       aliveInterruptStream <- Promise.make[Throwable, Unit]
-      aliveFiber           <- context.keepAliveStream(name, defaultTtl).interruptWhen(aliveInterruptStream).runDrain.fork
       _                    <- context // attempt to gain lock when delete element happens, if not keep listening otherwise terminate stream
                                 .onChangeStream(name)
                                 .interruptWhen(interruptStream)
-                                .collectZIO { case DeleteElement(name) =>
+                                .collectZIO { case DeleteElement(name) => // works when lock is lost?
                                   for {
+                                    _          <- ZIO.logInfo(s"Lock $name was deleted, trying to gain it")
                                     lockedGain <- context.setElementIfNotExist(name, bytes, Some(defaultTtl))
                                     _          <- interruptStream.succeed(()).when(lockedGain)
                                   } yield ()
                                 }
                                 .runDrain
                                 .unless(gainedLock)
+      _                    <- ZIO.logInfo(s"Lock $name was gained")
+      aliveFiber           <- context.keepAliveStream(name, defaultTtl).interruptWhen(aliveInterruptStream).runDrain.fork
       result               <- f.ensuring {
                                 aliveInterruptStream.succeed(()) *>
                                   context
                                     .deleteElement(name)
-                                    .tapError(err => ZIO.logError(s"Error releasing lock $name: ${err.getMessage}"))
+                                    .tapBoth(
+                                      err => ZIO.logError(s"Error releasing lock $name: ${err.getMessage}"),
+                                      _ => ZIO.logInfo(s"Lock $name released")
+                                    )
                                     .ignore
                               }
     } yield result
