@@ -126,7 +126,7 @@ object RedisDRefContext {
       }
 
       private def keepAlive(name: String, ttl: Duration): Task[Unit] =
-         redisClient.expire(Chunk.fromArray(name.getBytes), ttl).unit
+        redisClient.expire(Chunk.fromArray(name.getBytes), ttl).unit
 
       override def setElementIfNotExist(name: String, value: Array[Byte], ttl: Option[Duration]): Task[Boolean] = {
         val change = ChangePayload(name = Chunk.fromArray(name.getBytes), value = Chunk.fromArray(value))
@@ -150,6 +150,15 @@ object RedisDRefContext {
           case c @ ChangePayload(_, value, false) if c.nameString == name => SetElement(name, value.toArray)
           case c @ ChangePayload(_, value, true) if c.nameString == name  => DeleteElement(name)
         }
+
+      override def detectDeletionFromUnderlyingStream(
+        name: String
+      ): ZStream[Any, Throwable, DeleteElement] = {
+        val notExist = for {
+          result <- redisClient.get(Chunk.fromArray(name.getBytes))
+        } yield result.isEmpty
+        ZStream.repeatZIO(notExist.delay(1.second)).filter(identity).as(DeleteElement(name))
+      }
     }
   )
 }

@@ -96,6 +96,10 @@ trait DRefContext {
 
   def onChangeStream(name: String): ZStream[Any, Throwable, ChangeEvent]
 
+  def detectDeletionFromUnderlyingStream(
+    name: String
+  ): ZStream[Any, Throwable, DeleteElement]
+
 }
 
 sealed trait ChangeEvent {
@@ -175,6 +179,10 @@ object DRefContext {
     } *> changes.offer(DeleteElement(name)).unit
 
     override def defaultTtl: Duration = 5.seconds
+
+    override def detectDeletionFromUnderlyingStream(
+      name: String
+    ): ZStream[Any, Throwable, DeleteElement] = ZStream.never
   })
 }
 
@@ -221,8 +229,12 @@ object DRef {
       gainedLock           <- context.setElementIfNotExist(name, bytes, Some(defaultTtl))
       interruptStream      <- Promise.make[Throwable, Unit]
       aliveInterruptStream <- Promise.make[Throwable, Unit]
-      _                    <- context // attempt to gain lock when delete element happens, if not keep listening otherwise terminate stream
-                                .onChangeStream(name)
+      _                    <- ZStream
+                                .mergeAll(2)(
+                                  context // attempt to gain lock when delete element happens, if not keep listening otherwise terminate stream
+                                    .onChangeStream(name),
+                                  context.detectDeletionFromUnderlyingStream(name)
+                                )
                                 .interruptWhen(interruptStream)
                                 .collectZIO { case DeleteElement(name) => // works when lock is lost?
                                   for {
@@ -233,7 +245,7 @@ object DRef {
                                 }
                                 .runDrain
                                 .unless(gainedLock)
-      _                    <- ZIO.logInfo(s"Lock $name was gained")
+      _                    <- ZIO.logInfo(s"Lock $name acquired")
       aliveFiber           <- context.keepAliveStream(name, defaultTtl).interruptWhen(aliveInterruptStream).runDrain.fork
       result               <- f.ensuring {
                                 aliveInterruptStream.succeed(()) *>
