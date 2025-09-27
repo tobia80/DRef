@@ -2,9 +2,9 @@ import Dependencies.zio
 
 import scala.collection.Seq
 
-ThisBuild / version := "0.5.1"
+ThisBuild / version := "0.5.3"
 
-ThisBuild / scalaVersion := "3.5.2"
+ThisBuild / scalaVersion := "3.7.3"
 
 ThisBuild / organization         := "io.github.tobia80"
 ThisBuild / organizationName     := "tobia80"

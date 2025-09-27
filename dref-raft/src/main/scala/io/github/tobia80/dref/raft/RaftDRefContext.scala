@@ -1,7 +1,7 @@
 package io.github.tobia80.dref.raft
 
 import io.github.tobia80.dref.ZioDref.DRefRaftClient
-import io.github.tobia80.dref.{ChangeEvent, DRefContext, DeleteElementRequest, GetExpirationTableRequest}
+import io.github.tobia80.dref.*
 import io.grpc.ServerBuilder
 import io.grpc.netty.NettyChannelBuilder
 import io.grpc.protobuf.services.ProtoReflectionService
@@ -10,7 +10,7 @@ import reactor.core.publisher.Sinks
 import scalapb.zio_grpc.{ServerLayer, ServiceList, ZManagedChannel}
 import zio.interop.reactivestreams.*
 import zio.stream.{Take, ZStream}
-import zio.{durationInt, Hub, Promise, Ref, Runtime, Schedule, Scope, Task, URIO, Unsafe, ZIO, ZLayer, *}
+import zio.{Hub, Promise, Ref, Runtime, Schedule, Scope, Task, URIO, Unsafe, ZIO, ZLayer, durationInt, *}
 
 import java.util.Optional
 import java.util.concurrent.TimeUnit
@@ -129,7 +129,7 @@ object RaftDRefContext {
       elementsToDelete       = expirationMapResponse.getResult.collect {
                                  case (name, time) if time < now => name
                                }.toList
-      _                     <- ZIO.logInfo(s"Expiring elements $elementsToDelete").when(elementsToDelete.nonEmpty)
+      _                     <- ZIO.logDebug(s"Expiring elements $elementsToDelete").when(elementsToDelete.nonEmpty)
       _                     <-
         ZIO
           .foreach(elementsToDelete)(name => ZIO.fromCompletionStage(leaderNode.replicate(DeleteElementRequest(name))))
@@ -187,7 +187,7 @@ object RaftDRefContext {
 
                                            oldEndpoints     <- cachedAllEndpoints.get
                                            endpoints        <- grpcClient.retrieveEndpoints()
-                                           _                <- ZIO.logInfo(s"Discovered endpoints: $endpoints")
+                                           _                <- ZIO.logDebug(s"Discovered endpoints: $endpoints")
                                            endpointClientMap = addressClientMap.map { case (ip, client) =>
                                                                  client -> endpoints.filter(_.asInstanceOf[Endpoint].ip == ip).toList
                                                                }
@@ -199,9 +199,9 @@ object RaftDRefContext {
                                            _                   <- transports.get.map { inner =>
                                                                     inner.values.map(_.updateEndpoints(endpointClientMap))
                                                                   } // update all the transports not only mine
-                                           _                   <- ZIO.logInfo("Finding leader")
+                                           _                   <- ZIO.logDebug("Finding leader")
                                            leaderNodeHereMaybe <- findMyLeaderNode(myNodes)
-                                           _                   <- ZIO.logInfo(s"Finished leader discovery ${leaderNodeHereMaybe.map(_.getLocalEndpoint)}")
+                                           _                   <- ZIO.logDebug(s"Finished leader discovery ${leaderNodeHereMaybe.map(_.getLocalEndpoint)}")
                                            _                   <- leaderNodeHereMaybe match {
                                                                     case Some(leaderHere) =>
                                                                       propagateMembership(
@@ -212,7 +212,7 @@ object RaftDRefContext {
                                                                       ) // propagate changes
                                                                     case None             => ZIO.unit
                                                                   }
-                                           _                   <- ZIO.logInfo("Finished propagation")
+                                           _                   <- ZIO.logDebug("Finished propagation")
                                            _                   <- cachedAllEndpoints.set(endpoints)
                                            _                   <- initialized.succeed(())
                                          } yield ()
@@ -234,7 +234,7 @@ object RaftDRefContext {
       initialized.await *> createRaftNode(myEndpoint, myTransport, myTransport.endpointsList, sinks).tap { node =>
         val nodeDescriptor = NodeDescriptor(myEndpoint.id, node, myTransport)
         myNodes.update(old => old + (myEndpoint.id -> nodeDescriptor)) *>
-          ZIO.logInfo(s"Starting node $myEndpoint") *> ZIO.fromCompletableFuture(node.start()) *> ZIO.logInfo(
+          ZIO.logDebug(s"Starting node $myEndpoint") *> ZIO.fromCompletableFuture(node.start()) *> ZIO.logDebug(
             s"Node $myEndpoint started"
           )
       }
@@ -287,7 +287,7 @@ object RaftDRefContext {
       })
 
     override def onChangeStream(name: String): ZStream[Any, Throwable, ChangeEvent] =
-      ZStream.logInfo(s"Subscribing to $name") *>
+      ZStream.logDebug(s"Subscribing to $name") *>
         ZStream.fromHub(hub).flattenTake.collect { case c if c.name == name => c }
 
     override def registerNode(id: String): Task[Unit] = {
@@ -299,10 +299,10 @@ object RaftDRefContext {
         endpointClientMap <- endpointClientMapRef.get
         _                  = transport.updateEndpoints(endpointClientMap)
         raftNode          <- createRaftNode(endpoint, transport, endpointList, sinks)
-        _                 <- ZIO.logInfo(s"Starting node $endpoint")
+        _                 <- ZIO.logDebug(s"Starting node $endpoint")
         _                 <- ZIO.fromCompletableFuture(raftNode.start())
         report            <- ZIO.fromCompletionStage(raftNode.getReport)
-        _                 <- ZIO.logInfo(
+        _                 <- ZIO.logDebug(
                                s"Node $endpoint started, effective members are ${report.getResult.getCommittedMembers.getMembers}"
                              )
         _                 <- endpointsOnThisJvm.update(old => old + endpoint) *> myNodes.update(old =>
@@ -320,5 +320,9 @@ object RaftDRefContext {
     } yield ()
 
     override def defaultTtl: Duration = config.ttl.getOrElse(20.seconds)
+
+    override def detectDeletionFromUnderlyingStream(
+      name: String
+    ): ZStream[Any, Throwable, DeleteElement] = ZStream.never
   })
 }
