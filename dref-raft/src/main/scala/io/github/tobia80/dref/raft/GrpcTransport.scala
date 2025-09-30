@@ -22,7 +22,9 @@ class GrpcTransport(source: RaftEndpoint, runtime: Runtime[Any]) extends Transpo
       findClient(target).getOrElse(throw new IllegalArgumentException(s"No client found for target ${target.getId}"))
     val ip = target.asInstanceOf[Endpoint].ip
     Unsafe.unsafe { implicit unsafe =>
-      val bytes = SerializationUtils.serialize(message)
+      val bytes = SerializationUtils.serialize(
+        message
+      ) // TODO use GRPC here or msgpack wrapping into case classes and transforming it and viceversa
       runtime.unsafe
         .run(client.sendCommand(SendCommandRequest(target.getId.asInstanceOf[String], ByteString.copyFrom(bytes))))
         .getOrThrow()
