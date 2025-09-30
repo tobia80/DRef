@@ -1,6 +1,7 @@
 package io.github.tobia80.dref
 
 import DRef.*
+import DRef.auto.*
 import zio.test.{assertTrue, Spec, TestAspect, TestClock, TestEnvironment, ZIOSpecDefault}
 import zio.{durationInt, Ref, Scope, ZIO}
 

@@ -2,7 +2,7 @@ import Dependencies.zio
 
 import scala.collection.Seq
 
-ThisBuild / version := "0.5.3"
+ThisBuild / version := "0.5.4"
 
 ThisBuild / scalaVersion := "3.7.3"
 
@@ -32,7 +32,8 @@ val coreDeps = Seq(
   "dev.zio"         %% "zio"                         % zio,
   "dev.zio"         %% "zio-interop-reactivestreams" % "2.0.2",
   "io.github.vigoo" %% "desert-zio"                  % "0.3.6",
-  "io.github.vigoo" %% "desert-zio-schema"           % "0.3.6"
+  "io.github.vigoo" %% "desert-zio-schema"           % "0.3.6",
+  "dev.zio"         %% "zio-schema-msg-pack"         % "1.7.5"
 ) ++ testDeps
 
 val redisDeps = Seq(

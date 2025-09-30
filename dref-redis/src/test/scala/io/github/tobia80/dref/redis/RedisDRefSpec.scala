@@ -2,18 +2,21 @@ package io.github.tobia80.dref.redis
 
 import io.github.tobia80.dref.DRef
 import io.github.tobia80.dref.DRef.*
+import io.github.tobia80.dref.DRef.auto.*
 import zio.*
 import zio.test.{assertTrue, Spec, TestAspect, TestEnvironment, ZIOSpecDefault}
 
 object RedisDRefSpec extends ZIOSpecDefault {
 
+  case class Wrapper(value: String)
+
   override def spec: Spec[TestEnvironment & Scope, Any] = suite("DRef Redis")(
     test("should be able to create a DRef") {
       for {
-        aRef  <- DRef.make("hi")
-        _     <- aRef.set("hello")
+        aRef  <- DRef.make(Wrapper("hi"))
+        _     <- aRef.set(Wrapper("hello"))
         value <- aRef.get
-      } yield assertTrue(value == "hello")
+      } yield assertTrue(value == Wrapper("hello"))
     },
     test("should be able to listen for changes") {
       for {

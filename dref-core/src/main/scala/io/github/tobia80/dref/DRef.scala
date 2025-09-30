@@ -1,10 +1,11 @@
 package io.github.tobia80.dref
 
-import io.github.vigoo.desert.*
 import io.github.vigoo.desert.zioschema.DerivedBinaryCodec
+import io.github.vigoo.desert.{bigDecimalCodec, *}
 import zio.ZIO.fromEither
 import zio.internal.stacktracer.Tracer.*
-import zio.schema.{DeriveSchema, Schema}
+import zio.schema.codec.MessagePackCodec
+import zio.schema.{DeriveSchema, Schema, StandardType}
 import zio.stream.ZStream
 import zio.{
   duration2DurationOps,
@@ -21,7 +22,6 @@ import zio.{
   Scope,
   Task,
   Trace,
-  ULayer,
   ZIO,
   ZLayer
 }
@@ -188,13 +188,62 @@ object DRefContext {
 
 object DRef {
 
-  export io.github.vigoo.desert.{bigDecimalCodec, booleanCodec, stringCodec}
-
   object auto {
-    implicit inline def derived[T: Mirror.Of]: BinaryCodec[T] = DerivedBinaryCodec.derive[T]
+
+    export io.github.vigoo.desert.{
+      bigDecimalCodec,
+      booleanCodec,
+      doubleCodec,
+      floatCodec,
+      intCodec,
+      longCodec,
+      stringCodec
+    }
 
     implicit inline def derivedSchema[T: Mirror.Of]: Schema[T] = DeriveSchema.gen[T]
 
+    private case class DesertDRefCodec[T: BinaryCodec]() extends DRefCodec[T] {
+
+      override def serialize(value: T): Task[Array[Byte]] =
+        ZIO
+          .fromEither(io.github.vigoo.desert.serializeToArray(value))
+          .mapError(failure => new Throwable(failure.message))
+
+      override def deserialize(data: Chunk[Byte]): Task[T] =
+        ZIO
+          .fromEither(io.github.vigoo.desert.deserializeFromArray(data.toArray))
+          .mapError(failure => new Throwable(failure.message))
+    }
+
+    implicit inline def derived[T: Schema]: DRefCodec[T] = {
+      implicit val codec: BinaryCodec[T] = DerivedBinaryCodec.derive[T]
+      DesertDRefCodec[T]()
+    }
+  }
+
+  object msgpack {
+
+    import zio.schema.codec.BinaryCodec as SchemaBinaryCodec
+    import zio.schema.Schema.*
+    export zio.schema.Schema
+    export zio.schema.Schema.bigDecimal
+    implicit inline def derivedSchema[T: Mirror.Of]: Schema[T] = DeriveSchema.gen[T]
+
+    private case class MsgPackDRefCodec[T: SchemaBinaryCodec]() extends DRefCodec[T] {
+
+      override def serialize(value: T): Task[Array[Byte]] =
+        ZIO.attempt(implicitly[SchemaBinaryCodec[T]].encode(value).toArray)
+
+      override def deserialize(data: Chunk[Byte]): Task[T] =
+        ZIO
+          .fromEither(implicitly[SchemaBinaryCodec[T]].decode(data))
+          .mapError(failure => new Throwable(failure.message))
+    }
+
+    implicit inline def derived[T: Schema]: DRefCodec[T] = {
+      implicit val codec: SchemaBinaryCodec[T] = MessagePackCodec.messagePackCodec[T]
+      MsgPackDRefCodec[T]()
+    }
   }
 
   import java.security.MessageDigest
@@ -262,14 +311,14 @@ object DRef {
   def lock[R, A, T](id: IdProvider = AutoId)(f: => RIO[R, T])(implicit trace: Trace): RIO[DRefContext & R, T] =
     ZIO.serviceWithZIO[DRefContext](context => lockWithContext(context, id)(f))
 
-  def make[T: BinaryCodec](a: => T, id: IdProvider = AutoId)(implicit trace: Trace): RIO[DRefContext, DRef[T]] =
+  def make[T: DRefCodec](a: => T, id: IdProvider = AutoId)(implicit trace: Trace): RIO[DRefContext, DRef[T]] =
     for {
       context   <- ZIO.service[DRefContext]
       stack     <- ZIO.stackTrace
       hash      <- sha(stack.prettyPrint)
       traceInfo <-
         ZIO.fromOption(instance.unapply(trace)).orElseFail(new Throwable("No trace available"))
-      bytes     <- fromEither(serializeToArray(a)).mapError(failure => new Throwable(failure.message))
+      bytes     <- DRefCodec.serializeToArray(a)
       location   = traceInfo._1
       file       = traceInfo._2
       line       = traceInfo._3
@@ -286,33 +335,31 @@ sealed trait IdProvider
 case object AutoId extends IdProvider
 case class ManualId(value: String) extends IdProvider
 
-class DRefImpl[T: BinaryCodec](context: DRefContext)(name: String) extends DRef[T] {
+class DRefImpl[T: DRefCodec](context: DRefContext)(name: String) extends DRef[T] {
 
   override def get: Task[T] = {
     val result: Task[Option[Array[Byte]]] = context.getElement(name)
     result.flatMap {
       case Some(bytes) =>
-        fromEither(deserializeFromArray[T](bytes)).mapError(failure => new Throwable(failure.message))
+        DRefCodec.deserializeFromArray(bytes)
       case None        => ZIO.fail(new Throwable(s"Element $name not found"))
     }
   }
 
-  override def set(a: T): Task[Unit] = fromEither(serializeToArray(a))
-    .mapError(failure => new Throwable(failure.message))
+  override def set(a: T): Task[Unit] = DRefCodec
+    .serializeToArray(a)
     .flatMap(context.setElement(name, _, None))
 
   override def onChange[R](a: T => Task[R]): Task[Unit] = changeStream.foreach(a).fork.unit
 
   override def changeStream: ZStream[Any, Throwable, T] =
     context.onChangeStream(name).collectZIO { case SetElement(_, elementValue) =>
-      val value = deserializeFromArray[T](elementValue)
-      fromEither(value).mapError(failure => new Throwable(failure.message))
+      DRefCodec.deserializeFromArray[T](elementValue)
     }
 
-  override def setIfNotExist(a: T): Task[Boolean] =
-    fromEither(serializeToArray(a))
-      .mapError(failure => new Throwable(failure.message))
-      .flatMap(context.setElementIfNotExist(name, _, None))
+  override def setIfNotExist(a: T): Task[Boolean] = DRefCodec
+    .serializeToArray(a)
+    .flatMap(context.setElementIfNotExist(name, _, None))
 
   override def modify[B](f: T => (B, T)): Task[B] =
     DRef.lockWithContext(context, ManualId(s"lock:$name")) {

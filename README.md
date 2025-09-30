@@ -8,16 +8,17 @@ It can be used to implement leader election, shard management, change notificati
 
 ## Features
 - Built on top of ZIO for asynchronous and concurrent programming
-- Distributed, strongly-consistent reference (Ref) abstraction
+- Distributed, strongly consistent reference (Ref) abstraction
 - Distributed locks for mutual exclusion across nodes
 - Pub/Sub pattern for event-driven communication
 - Transparent serialization and deserialization of data
-- Automatic optimisation of data (only diff are sent across the wire)
+- Automatic optimization of data (only diffs are sent across the wire)
 - Highly configurable and extensible
 - Incredibly simple API similar to Ref
 - Synchronizes backend across cluster nodes
 - Raft, Redis and In Memory implementations
 - Pluggable backends
+- Pluggable codecs and therefore compatibility with other languages (msgpack)
 - Testable in ms
 
 ## Getting Started

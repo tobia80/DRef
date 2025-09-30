@@ -2,6 +2,7 @@ package io.github.tobia80.dref.raft
 
 import io.github.tobia80.dref.DRef
 import io.github.tobia80.dref.DRef.*
+import io.github.tobia80.dref.DRef.auto.*
 import io.github.tobia80.dref.raft.RaftDRefContext.RaftDRefContext
 import zio.*
 import zio.test.{assertTrue, Spec, TestAspect, TestEnvironment, ZIOSpecDefault}
