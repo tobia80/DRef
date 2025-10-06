@@ -3,6 +3,7 @@ package io.github.tobia80.dref.raft
 import com.google.protobuf.ByteString
 import io.github.tobia80.dref.SendCommandRequest
 import io.github.tobia80.dref.ZioDref.DRefRaftClient
+import io.github.tobia80.dref.raft.model.Endpoint
 import io.microraft.RaftEndpoint
 import io.microraft.model.message.RaftMessage
 import io.microraft.transport.Transport

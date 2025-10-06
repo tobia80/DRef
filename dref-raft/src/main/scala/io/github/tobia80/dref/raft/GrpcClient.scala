@@ -2,6 +2,7 @@ package io.github.tobia80.dref.raft
 
 import io.github.tobia80.dref.GetEndpointsRequest
 import io.github.tobia80.dref.ZioDref.DRefRaftClient
+import io.github.tobia80.dref.raft.model.Endpoint
 import io.microraft.RaftEndpoint
 import zio.stream.ZStream
 import zio.{durationInt, Chunk, Ref, Task, ZIO, *}
