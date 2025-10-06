@@ -2,6 +2,7 @@ package io.github.tobia80.dref.raft
 
 import io.github.tobia80.dref.ZioDref.DRefRaftClient
 import io.github.tobia80.dref.*
+import io.github.tobia80.dref.raft.model.Endpoint
 import io.grpc.ServerBuilder
 import io.grpc.netty.NettyChannelBuilder
 import io.grpc.protobuf.services.ProtoReflectionService
@@ -10,7 +11,7 @@ import reactor.core.publisher.Sinks
 import scalapb.zio_grpc.{ServerLayer, ServiceList, ZManagedChannel}
 import zio.interop.reactivestreams.*
 import zio.stream.{Take, ZStream}
-import zio.{Hub, Promise, Ref, Runtime, Schedule, Scope, Task, URIO, Unsafe, ZIO, ZLayer, durationInt, *}
+import zio.{durationInt, Hub, Promise, Ref, Runtime, Schedule, Scope, Task, URIO, Unsafe, ZIO, ZLayer, *}
 
 import java.util.Optional
 import java.util.concurrent.TimeUnit

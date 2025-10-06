@@ -3,6 +3,7 @@ package io.github.tobia80.dref.raft
 import com.google.protobuf.ByteString
 import io.github.tobia80.dref.*
 import io.github.tobia80.dref.ZioDref.ZDRefRaft
+import io.github.tobia80.dref.raft.model.Endpoint
 import io.grpc.{Status, StatusException}
 import io.microraft.exception.NotLeaderException
 import io.microraft.model.message.RaftMessage
@@ -36,8 +37,6 @@ class DRefGrpcServer(
     val endpoint = e.getLeader.asInstanceOf[Endpoint]
     LeaderException(endpoint.id, endpoint.ip, io.grpc.Status.FAILED_PRECONDITION.withDescription("Not the leader"))
   }
-
-
 
   override def setElement(
     request: SetElementRequest,

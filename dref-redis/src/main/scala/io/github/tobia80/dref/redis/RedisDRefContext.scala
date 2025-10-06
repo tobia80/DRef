@@ -1,14 +1,10 @@
 package io.github.tobia80.dref.redis
 
 import io.github.tobia80.dref.*
-import io.github.vigoo.desert.zioschema.DerivedBinaryCodec
-import io.github.vigoo.desert.{deserializeFromArray, serializeToArray, BinaryCodec, DesertFailure}
 import io.lettuce.core.{ClientOptions, RedisURI, SslOptions}
 import zio.*
 import zio.schema.{DeriveSchema, Schema}
 import zio.stream.{Take, ZStream}
-
-import scala.concurrent.duration.FiniteDuration
 
 case class RedisConfig(
   host: String,
@@ -63,7 +59,8 @@ object RedisDRefContext {
   }
 
   private given Schema[ChangePayload] = DeriveSchema.gen[ChangePayload]
-  private given BinaryCodec[ChangePayload] = DerivedBinaryCodec.derive
+
+  private given DRefCodec[ChangePayload] = DRef.msgpack.derived[ChangePayload] // TODO make it configurable?
 
   private val channel = Chunk.fromArray("dref-change".getBytes)
 
@@ -75,8 +72,8 @@ object RedisDRefContext {
       hub              <- Hub.bounded[Take[Throwable, ChangePayload]](64)
       _                <- redisSubscription
                             .mapZIO { value =>
-                              ZIO
-                                .fromEither(deserializeFromArray[ChangePayload](value.toArray))
+                              DRefCodec
+                                .deserializeFromArray[ChangePayload](value.toArray)
                                 .tapError { error =>
                                   ZIO.logError(s"Cannot decode notification ($value) (Error: $error)")
                                 }
@@ -95,28 +92,26 @@ object RedisDRefContext {
 
       override def setElement(name: String, a: Array[Byte], ttl: Option[Duration]): Task[Unit] = {
         val change = ChangePayload(name = Chunk.fromArray(name.getBytes), value = Chunk.fromArray(a))
-        val result: Either[DesertFailure, Array[Byte]] = serializeToArray[ChangePayload](change)
-        result match {
-          case Right(value) =>
-            for {
-              _ <- redisClient.set(Chunk.fromArray(name.getBytes), Chunk.fromArray(a), ttl)
-              _ <- publish(Chunk.fromArray(value))
-            } yield ()
-          case Left(error)  => ZIO.fail(new Exception(s"Cannot serialize notification ($change) (Error: $error)"))
-        }
+        for {
+          value <-
+            DRefCodec
+              .serializeToArray[ChangePayload](change)
+              .mapError(err => new Exception(s"Cannot serialize notification ($change) (Error: ${err.getMessage})"))
+          _     <- redisClient.set(Chunk.fromArray(name.getBytes), Chunk.fromArray(a), ttl)
+          _     <- publish(Chunk.fromArray(value))
+        } yield ()
       }
 
       override def deleteElement(name: String): Task[Unit] = {
         val delete = ChangePayload(name = Chunk.fromArray(name.getBytes), value = Chunk.empty, delete = true)
-        val result: Either[DesertFailure, Array[Byte]] = serializeToArray[ChangePayload](delete)
-        result match {
-          case Right(value) =>
-            for {
-              _ <- redisClient.del(Chunk.fromArray(name.getBytes))
-              _ <- publish(Chunk.fromArray(value))
-            } yield ()
-          case Left(error)  => ZIO.fail(new Exception(s"Cannot serialize notification ($delete) (Error: $error)"))
-        }
+        for {
+          value <-
+            DRefCodec
+              .serializeToArray[ChangePayload](delete)
+              .mapError(err => new Exception(s"Cannot serialize notification ($delete) (Error: ${err.getMessage})"))
+          _     <- redisClient.del(Chunk.fromArray(name.getBytes))
+          _     <- publish(Chunk.fromArray(value))
+        } yield ()
       }
 
       import zio.Duration
@@ -130,16 +125,15 @@ object RedisDRefContext {
 
       override def setElementIfNotExist(name: String, value: Array[Byte], ttl: Option[Duration]): Task[Boolean] = {
         val change = ChangePayload(name = Chunk.fromArray(name.getBytes), value = Chunk.fromArray(value))
-        val result: Either[DesertFailure, Array[Byte]] = serializeToArray[ChangePayload](change)
-        result match {
-          case Right(value) =>
-            for {
-              result <- redisClient.setNx(Chunk.fromArray(name.getBytes), Chunk.fromArray(value))
-              _      <- ttl.fold(ZIO.unit)(keepAlive(name, _)).when(result)
-              _      <- publish(Chunk.fromArray(value)).when(result)
-            } yield result
-          case Left(error)  => ZIO.fail(new Exception(s"Cannot serialize notification ($change) (Error: $error)"))
-        }
+        for {
+          value  <-
+            DRefCodec
+              .serializeToArray[ChangePayload](change)
+              .mapError(err => new Exception(s"Cannot serialize notification ($change) (Error: ${err.getMessage})"))
+          result <- redisClient.setNx(Chunk.fromArray(name.getBytes), Chunk.fromArray(value))
+          _      <- ttl.fold(ZIO.unit)(keepAlive(name, _)).when(result)
+          _      <- publish(Chunk.fromArray(value)).when(result)
+        } yield result
       }
 
       override def getElement(name: String): Task[Option[Array[Byte]]] =
