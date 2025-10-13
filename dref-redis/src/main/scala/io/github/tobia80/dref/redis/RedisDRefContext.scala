@@ -117,10 +117,10 @@ object RedisDRefContext {
       import zio.Duration
       override def keepAliveStream(name: String, ttl: Duration): ZStream[Any, Throwable, Unit] = {
         val ttlZio = Duration.fromScala(ttl.asFiniteDuration / 1.25)
-        ZStream.repeatZIOWithSchedule(keepAlive(name, ttl), Schedule.fixed(ttlZio))
+        ZStream.repeatZIOWithSchedule(expire(name, ttl), Schedule.fixed(ttlZio))
       }
 
-      private def keepAlive(name: String, ttl: Duration): Task[Unit] =
+      private def expire(name: String, ttl: Duration): Task[Unit] =
         redisClient.expire(Chunk.fromArray(name.getBytes), ttl).unit
 
       override def setElementIfNotExist(name: String, value: Array[Byte], ttl: Option[Duration]): Task[Boolean] = {
@@ -130,8 +130,7 @@ object RedisDRefContext {
             DRefCodec
               .serializeToArray[ChangePayload](change)
               .mapError(err => new Exception(s"Cannot serialize notification ($change) (Error: ${err.getMessage})"))
-          result <- redisClient.setNx(Chunk.fromArray(name.getBytes), Chunk.fromArray(value))
-          _      <- ttl.fold(ZIO.unit)(keepAlive(name, _)).when(result)
+          result <- redisClient.setNx(Chunk.fromArray(name.getBytes), Chunk.fromArray(value), ttl)
           _      <- publish(Chunk.fromArray(value)).when(result)
         } yield result
       }
