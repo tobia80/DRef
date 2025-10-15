@@ -1,102 +1,174 @@
 # DRef
 
-Distributed Ref (DRef) is a distributed variable implementation designed to synchronize state across multiple nodes in one or more distributed systems. It provides a simple and robust abstraction for managing shared, mutable state in distributed systems. In addition to distributed references, DRef also implements distributed locks and pub/sub patterns for advanced coordination and messaging.
-Memory implementation is backed by Ref and it is useful for testing or single-node applications.
+Distributed Ref (DRef) is a toolkit for synchronising state and coordination
+primitives across clusters of ZIO applications. It lets you treat distributed
+state the same way you would work with an ordinary `Ref`, while also giving you
+cluster-wide locks and change streams when you need stronger coordination.
 
-## Use cases
-It can be used to implement leader election, shard management, change notifications, locks and everything that needs coordination across nodes.
+DRef makes it easy to build services that stay in sync without wiring together
+custom replication logic, retry loops, or bespoke consensus code.
 
-## Features
-- Built on top of ZIO for asynchronous and concurrent programming
-- Distributed, strongly consistent reference (Ref) abstraction
-- Distributed locks for mutual exclusion across nodes
-- Pub/Sub pattern for event-driven communication
-- Transparent serialization and deserialization of data
-- Automatic optimization of data (only diffs are sent across the wire)
-- Highly configurable and extensible
-- Incredibly simple API similar to Ref
-- Synchronizes backend across cluster nodes
-- Raft, Redis and In Memory implementations
-- Pluggable backends
-- Pluggable codecs and therefore compatibility with other languages (msgpack)
-- Testable in ms
+## Highlights
+- **Drop-in `Ref` semantics.** Work with a distributed value using familiar
+  transactional combinators such as `get`, `set`, `update`, and `modifyZIO`.
+- **Strong consistency where it matters.** Raft-backed storage keeps state in
+  sync across nodes while minimising bandwidth by shipping deltas.
+- **Locking & notifications built-in.** Use distributed locks for mutual
+  exclusion or subscribe to change streams to broadcast domain events.
+- **Backend flexibility.** Switch between Raft, Redis, or in-memory
+  implementations to match the deployment environment.
+- **Codec agnostic.** Bring your own codecs (e.g. Desert or MsgPack) to talk to
+  services written in other languages.
 
-## Getting Started
+## When to use DRef
+DRef shines whenever you need low-latency coordination across JVM services. A
+few high-impact scenarios include:
 
-Add DRef to your project dependencies
+- **Leader election & failover.** Run one active worker per shard, fail over in
+  seconds, and log who took over.
+- **Dynamic configuration flags.** Push feature toggles or rollout percentages
+  to every node without redeploying.
+- **Cross-service task scheduling.** Coordinate which node processes a batch or
+  ensure only one node runs a cron job at a time.
+- **Collaborative counters and stats.** Maintain cluster-wide metrics (e.g.
+  connected users, processed jobs) that update atomically from any node.
+- **Event notifications.** Fan-out domain events through change streams while
+  sharing a strongly consistent reference to the latest state.
 
-## Usage Example
-
-Below is a typical usage pattern for DRef. Replace with actual code from your main or test files if available.
-
-```scala
-import dref.DRef
-import zio._
-
-object Example extends ZIOAppDefault {
-  override def run = for {
-    dref <- DRef.make[Int](0) // Create a distributed ref with initial value 0
-    _    <- dref.update(_ + 1) // Atomically increment the value
-    v    <- dref.get           // Read the current value
-    _    <- ZIO.logInfo(s"Current value: $v")
-  } yield ()
-}
-```
-DRef takes an id to uniquely identify the reference across the nodes. The default provider is Auto that generates automatically an id based on the source code location. If you see weird behaviours, it could be safer to use ManualId setting a unique reference across nodes.
-
-## Leader election example
-DRef can be used to implement leader election in a distributed system. Here is an example:
+## Quick start
+Add DRef to your `build.sbt`:
 
 ```scala
-
-import dref.DRef
-import dref.DRef.*
-import zio._
-
-object Example extends ZIOAppDefault {
-  override def run = for {
-    leadershipInfo <- DRef.make[LeadershipInfo](LeadershipInfo(info = None))
-    _    <- leadershipInfo.getAndUpdateZIO{ info =>
-      if (!info.leaderElected) setAsLeader(info) <* ZIO.logInfo("I am the leader")
-      else ZIO.logInfo(s"Leader already elected: ${info.info}") *> ZIO.succeed(info)
-    }
-  } yield ()
-}
+libraryDependencies += "io.github.tobia80" %% "dref" % "<latest-version>"
 ```
-## Distributed Locks Example
 
-DRef provides distributed locks to ensure mutual exclusion across fibers or nodes. Here is an example inspired by the test suite:
+Create a distributed reference, update it, and observe the changes:
 
 ```scala
-import dref.DRef
-import zio._
+import io.github.tobia80.dref.{DRef, DRefContext}
+import zio.*
 
-object LockExample extends ZIOAppDefault {
-  override def run = for {
-    list  <- Ref.make(List.empty[Int])
-    fiber <- ZIO.foreachParDiscard(List(100, 200)) { id =>
-      (ZIO.logInfo(s"Starting $id") *>
-        DRef.lock() {
-          ZIO.logInfo(s"Executing $id") *>
-          list.update(_ :+ id) *>
-          ZIO.sleep(1.second)
-        }).delay(id.millis)
-    }.fork
-    _     <- ZIO.sleep(500.millis)
-    valueWithOneLock <- list.get
-    _     <- fiber.join
-    valueWithTwoLocks <- list.get
-    _     <- ZIO.logInfo(s"After 500ms: $valueWithOneLock, after all: $valueWithTwoLocks")
-  } yield ()
-}
+object QuickStart extends ZIOAppDefault:
+  override def run =
+    (for
+      ref <- DRef.make[Int](0)
+      _   <- ref.update(_ + 1)
+      v   <- ref.get
+      _   <- ZIO.logInfo(s"Current value: $v")
+    yield ()).provideLayer(DRefContext.local)
 ```
 
-This example shows two concurrent tasks attempting to acquire the same lock. The lock ensures that only one task executes its critical section at a time, even in a distributed environment.
+`DRefContext.local` gives you an in-memory implementation, perfect for tests or
+trying the API in a single process. Swap in the Raft or Redis layer when you are
+ready to go multi-node.
+
+## Use-case playbook
+The following short recipes show how DRef helps with common distributed tasks.
+
+### 1. Coordinated background workers
+Keep only one active worker per partition while others stay hot and ready to
+fail over:
+
+```scala
+import io.github.tobia80.dref.{DRef, DRefContext, ManualId}
+import zio.*
+
+final case class WorkerState(leader: Option[String])
+
+object LeaderElection extends ZIOAppDefault:
+  private val nodeId = java.util.UUID.randomUUID().toString
+
+  override def run =
+    (for
+      leadership <- DRef.make(WorkerState(None), id = ManualId("worker-leadership"))
+      _          <- leadership.getAndUpdateZIO { state =>
+                      state.leader.fold(
+                        ZIO.succeed(state.copy(leader = Some(nodeId))) <*
+                          ZIO.logInfo("Claimed leadership")
+                      )(leader =>
+                        ZIO.logInfo(s"Leader already active: $leader").as(state)
+                      )
+                    }
+    yield ()).provideLayer(DRefContext.local)
+```
+
+This snippet elects a leader while ensuring every node sees the same decision.
+If the leader dies, the next node calling `getAndUpdateZIO` takes over.
+
+### 2. Cluster-wide feature flags
+Propagate feature toggles instantly and atomically by listening to change
+streams:
+
+```scala
+import io.github.tobia80.dref.{DRef, DRefContext, ManualId}
+import zio.*
+
+final case class Flags(betaFeature: Boolean, rollout: Int)
+
+val program =
+  (for
+    flags <- DRef.make(Flags(betaFeature = false, rollout = 0), ManualId("feature-flags"))
+    _     <- flags.onChange(flag => ZIO.logInfo(s"Flags changed to $flag"))
+    _     <- flags.set(Flags(betaFeature = true, rollout = 5))
+  yield ()).provideLayer(DRefContext.local)
+```
+
+Every subscriber receives updates as soon as they happen, while reads from the
+reference remain strongly consistent.
+
+### 3. Distributed throttling with locks
+Ensure that a job runs only once across the cluster using distributed locks:
+
+```scala
+import io.github.tobia80.dref.{DRef, DRefContext, ManualId}
+import zio.*
+
+object ThrottledJob extends ZIOAppDefault:
+  override def run =
+    DRef.lock(ManualId("daily-report")) {
+      ZIO.logInfo("Generating report...") *>
+        generateReport
+    }.provideLayer(DRefContext.local)
+```
+
+If another node attempts to run `ThrottledJob` at the same time, it will block
+until the lock is released (or fail fast if you wrap it with a timeout).
+
+### 4. Live dashboards powered by DRef
+Maintain shared counters that drive real-time dashboards:
+
+```scala
+import io.github.tobia80.dref.{DRef, DRefContext, ManualId}
+import zio.*
+
+object Metrics extends ZIOAppDefault:
+  override def run =
+    (for
+      activeUsers <- DRef.make[Int](0, ManualId("active-users"))
+      _           <- activeUsers.update(_ + 1)
+      current     <- activeUsers.get
+      _           <- ZIO.logInfo(s"Active users: $current")
+    yield ()).repeat(Schedule.spaced(5.seconds))
+      .provideLayer(DRefContext.local)
+```
+
+Because updates are diffed and replicated automatically, every node can display
+identical, up-to-date metrics without central bottlenecks.
+
+## Architecture at a glance
+- **Core API (`dref-core`).** Defines the distributed reference abstraction,
+  codecs, locking helpers, and change streams.
+- **Backends.**
+  - `dref-raft`: consensus-backed storage for production clusters.
+  - `dref-redis`: integrate with existing Redis deployments.
+  - `dref-inmemory`: ideal for tests or local development.
+- **Examples.** The `example` module contains ready-to-run demos that show how
+  to wire everything together with ZIO layers.
 
 ## Testing
+Run the full test suite with:
 
-DRef includes a comprehensive test suite. To run the tests:
-```sh
+```bash
 sbt test
 ```
 
