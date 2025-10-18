@@ -62,6 +62,52 @@ object QuickStart extends ZIOAppDefault:
 trying the API in a single process. Swap in the Raft or Redis layer when you are
 ready to go multi-node.
 
+## Run the example cluster with Docker
+
+You can experiment with the Raft backend locally by running three instances of
+the chat example in Docker. The repository includes a compose file that builds a
+container image for the `example` module and joins the nodes into the same
+cluster using DNS discovery.
+
+1. Build and start the nodes:
+
+   ```bash
+   docker compose up --build
+   ```
+
+   The compose stack creates three services (`dref-node-1`…`dref-node-3`). Each
+   service publishes port `8082` inside the cluster and maps it to `8082`,
+   `8083`, and `8084` on the host for convenience.
+
+2. Attach to the containers from separate terminals to interact with the
+   running example:
+
+   ```bash
+   docker compose attach dref-node-1
+   docker compose attach dref-node-2
+   docker compose attach dref-node-3
+   ```
+
+   Every terminal prompts for a user name and message. When one node sends a
+   message it is broadcast to the other two nodes through the Raft log.
+
+3. Press <kbd>Ctrl</kbd>+<kbd>p</kbd> followed by <kbd>Ctrl</kbd>+<kbd>q</kbd> to
+   detach from a container without stopping it. When you are done testing, stop
+   the cluster with:
+
+   ```bash
+   docker compose down
+   ```
+
+The example honours the following environment variables, which the compose file
+sets automatically:
+
+- `DREF_NODE_SERVICES` — comma separated list of DNS names to discover other
+  Raft nodes.
+- `DREF_NODE_ADDRESSES` — optional override that accepts a comma separated list
+  of IP addresses instead of DNS names.
+- `DREF_PORT` — the port used by the gRPC server (defaults to `8082`).
+
 ## Use-case playbook
 The following short recipes show how DRef helps with common distributed tasks.
 

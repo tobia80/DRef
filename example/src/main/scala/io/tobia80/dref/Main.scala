@@ -14,6 +14,33 @@ object Main extends ZIOAppDefault {
 
   private case class DRefMessage(name: String, message: String)
 
+  private val DefaultPort     = 8082
+  private val NodesAddresses  = "DREF_NODE_ADDRESSES"
+  private val NodesServices   = "DREF_NODE_SERVICES"
+  private val PortEnvironment = "DREF_PORT"
+
+  private val raftConfigLayer: ZLayer[Any, Nothing, RaftConfig] = {
+    val port = sys.env
+      .get(PortEnvironment)
+      .flatMap(_.toIntOption)
+      .getOrElse(DefaultPort)
+
+    ZLayer.succeed(RaftConfig(port))
+  }
+
+  private val ipProviderLayer: ZLayer[Any, Nothing, IpProvider] = {
+    def parse(name: String): Option[Seq[String]] =
+      sys.env
+        .get(name)
+        .map(_.split(',').map(_.trim).filter(_.nonEmpty).toSeq)
+        .filter(_.nonEmpty)
+
+    parse(NodesAddresses)
+      .map(addresses => IpProvider.static(addresses*))
+      .orElse(parse(NodesServices).map(services => IpProvider.dnsBased(services*)))
+      .getOrElse(IpProvider.local)
+  }
+
   private def printReadMessageAndSend(str: String) =
     for {
       dref <- DRef.make[Option[DRefMessage]](None)
@@ -47,8 +74,8 @@ object Main extends ZIOAppDefault {
       }
       .provide(
         RaftDRefContext.live,
-        ZLayer.succeed(RaftConfig(8082)),
-        IpProvider.static("192.168.4.54", "192.168.4.79", "192.168.4.110"),
+        raftConfigLayer,
+        ipProviderLayer,
         Scope.default
       )
 }
