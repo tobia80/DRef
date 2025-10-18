@@ -3,7 +3,7 @@ package io.github.tobia80.dref
 import DRef.*
 import DRef.auto.*
 import zio.test.{assertTrue, Spec, TestAspect, TestClock, TestEnvironment, ZIOSpecDefault}
-import zio.{durationInt, Ref, Scope, ZIO}
+import zio.{durationInt, Promise, Ref, Scope, ZIO}
 
 object DRefSpec extends ZIOSpecDefault {
 
@@ -43,6 +43,35 @@ object DRefSpec extends ZIOSpecDefault {
         _                 <- fiber.join
         valueWithTwoLocks <- list.get
       } yield assertTrue(valueWithOneLock == List(100) && valueWithTwoLocks == List(100, 200))
-    } @@ TestAspect.withLiveClock
+    } @@ TestAspect.withLiveClock,
+    test("lock release should not remove a lock reacquired by another owner") {
+      val lockName = "lock:test-ownership"
+      val lockId = ManualId(lockName)
+      for {
+        context        <- ZIO.service[DRefContext]
+        firstAcquired  <- Promise.make[Nothing, Unit]
+        releaseFirst   <- Promise.make[Nothing, Unit]
+        secondAcquired <- Promise.make[Nothing, Unit]
+        releaseSecond  <- Promise.make[Nothing, Unit]
+        firstFiber     <- DRef
+                            .lockWithContext(context, lockId) {
+                              firstAcquired.succeed(()) *> releaseFirst.await
+                            }
+                            .fork
+        _              <- firstAcquired.await
+        _              <- context.deleteElement(lockName)
+        secondFiber    <- DRef
+                            .lockWithContext(context, lockId) {
+                              secondAcquired.succeed(()) *> releaseSecond.await
+                            }
+                            .fork
+        _              <- secondAcquired.await
+        _              <- firstFiber.interrupt
+        _              <- firstFiber.await.ignore
+        stored         <- context.getElement(lockName)
+        _              <- releaseSecond.succeed(())
+        _              <- secondFiber.join
+      } yield assertTrue(stored.isDefined)
+    }
   ).provideSome[Scope](DRefContext.local)
 }

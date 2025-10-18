@@ -299,12 +299,23 @@ object DRef {
       result               <- f.ensuring {
                                 aliveInterruptStream.succeed(()) *>
                                   context
-                                    .deleteElement(name)
-                                    .tapBoth(
-                                      err => ZIO.logError(s"Error releasing lock $name: ${err.getMessage}"),
-                                      _ => ZIO.logInfo(s"Lock $name released")
+                                    .getElement(name)
+                                    .foldZIO(
+                                      err => ZIO.logError(s"Error retrieving lock $name for release: ${err.getMessage}"),
+                                      {
+                                        case Some(current) if java.util.Arrays.equals(current, bytes) =>
+                                          context
+                                            .deleteElement(name)
+                                            .foldZIO(
+                                              err => ZIO.logError(s"Error releasing lock $name: ${err.getMessage}"),
+                                              _ => ZIO.logInfo(s"Lock $name released")
+                                            )
+                                        case Some(_) =>
+                                          ZIO.logInfo(s"Lock $name already acquired by another owner, skipping release")
+                                        case None =>
+                                          ZIO.logInfo(s"Lock $name already released")
+                                      }
                                     )
-                                    .ignore
                               }
     } yield result
 
