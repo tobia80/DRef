@@ -172,6 +172,54 @@ Run the full test suite with:
 sbt test
 ```
 
+## Run the example cluster with Docker
+
+You can experiment with the Raft backend locally by running three instances of
+the chat example in Docker. The repository includes a compose file that builds a
+container image for the `example` module and uses Docker DNS to make every node
+discoverable through a single service name.
+
+1. Build the image and start three replicas of the service:
+
+   ```bash
+   docker compose up --build --scale dref-example=3
+   ```
+
+   Compose provisions the `dref-example` service and scales it to three
+   containers. Each replica exposes the gRPC port `8082` to the internal
+   network, and the nodes discover one another through the shared `dref-example`
+   hostname.
+
+2. Attach to the containers from separate terminals to interact with the
+   running example:
+
+   ```bash
+   docker compose attach dref-example-1
+   docker compose attach dref-example-2
+   docker compose attach dref-example-3
+   ```
+
+   Every terminal prompts for a user name and message. When one node sends a
+   message it is broadcast to the other replicas through the Raft log.
+
+3. Press <kbd>Ctrl</kbd>+<kbd>p</kbd> followed by <kbd>Ctrl</kbd>+<kbd>q</kbd> to
+   detach from a container without stopping it. When you are done testing, stop
+   the cluster with:
+
+   ```bash
+   docker compose down
+   ```
+
+The example honours the following environment variables, which the compose file
+sets automatically:
+
+- `DREF_NODE_SERVICES` — comma separated list of DNS names to discover other
+  Raft nodes. By default every node resolves `dref-example` to the full replica
+  set.
+- `DREF_NODE_ADDRESSES` — optional override that accepts a comma separated list
+  of IP addresses instead of DNS names.
+- `DREF_PORT` — the port used by the gRPC server (defaults to `8082`).
+
 ## License
 
 This project is licensed under the terms of the LICENSE file in this repository.
