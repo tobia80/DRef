@@ -1,46 +1,15 @@
 version: "3.9"
 
 services:
-  dref-node-1:
+  dref-example:
     build:
       context: .
       dockerfile: docker/example.Dockerfile
-    container_name: dref-node-1
     environment:
-      DREF_NODE_SERVICES: dref-node-1,dref-node-2,dref-node-3
+      DREF_NODE_SERVICES: dref-example
       DREF_PORT: "8082"
-    ports:
-      - "8082:8082"
-    stdin_open: true
-    tty: true
-    networks:
-      - dref-cluster
-
-  dref-node-2:
-    build:
-      context: .
-      dockerfile: docker/example.Dockerfile
-    container_name: dref-node-2
-    environment:
-      DREF_NODE_SERVICES: dref-node-1,dref-node-2,dref-node-3
-      DREF_PORT: "8082"
-    ports:
-      - "8083:8082"
-    stdin_open: true
-    tty: true
-    networks:
-      - dref-cluster
-
-  dref-node-3:
-    build:
-      context: .
-      dockerfile: docker/example.Dockerfile
-    container_name: dref-node-3
-    environment:
-      DREF_NODE_SERVICES: dref-node-1,dref-node-2,dref-node-3
-      DREF_PORT: "8082"
-    ports:
-      - "8084:8082"
+    expose:
+      - "8082"
     stdin_open: true
     tty: true
     networks:
