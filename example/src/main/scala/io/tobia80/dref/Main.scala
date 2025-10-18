@@ -14,9 +14,9 @@ object Main extends ZIOAppDefault {
 
   private case class DRefMessage(name: String, message: String)
 
-  private val DefaultPort     = 8082
-  private val NodesAddresses  = "DREF_NODE_ADDRESSES"
-  private val NodesServices   = "DREF_NODE_SERVICES"
+  private val DefaultPort = 8082
+  private val NodesAddresses = "DREF_NODE_ADDRESSES"
+  private val NodesServices = "DREF_NODE_SERVICES"
   private val PortEnvironment = "DREF_PORT"
 
   private val raftConfigLayer: ZLayer[Any, Nothing, RaftConfig] = {
