@@ -49,9 +49,6 @@ message DeleteElementRequest {
 }
 message DeleteElementResponse {}
 
-
-
-
 message SendCommandRequest {
   string id = 1;
   bytes payload = 2;
