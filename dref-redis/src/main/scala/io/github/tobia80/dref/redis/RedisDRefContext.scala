@@ -163,7 +163,7 @@ object RedisDRefContext {
               .serializeToArray[ChangePayload](change)
               .mapError(err => new Exception(s"Cannot serialize notification ($change) (Error: ${err.getMessage})"))
           result       <- redisClient.get(Chunk.fromArray(name.getBytes))
-        } yield result.exists(el => !(util.Arrays.equals(el.toArray, valueToCheck)))
+        } yield result.forall(el => !util.Arrays.equals(el.toArray, valueToCheck))
         ZStream.repeatZIO(stolen.delay(1.second)).filter(identity).as(StolenElement(name))
       }
     }
