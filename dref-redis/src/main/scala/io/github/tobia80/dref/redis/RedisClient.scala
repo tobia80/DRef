@@ -36,6 +36,7 @@ object RedisClient {
     ZIO.acquireRelease {
       ZIO.attempt {
         val client: core.RedisClient = core.RedisClient.create(config.toRedisURI)
+        client.setOptions(config.toOptions)
         val asyncClient = client.connect(ByteArrayCodec.INSTANCE).async
         val reactive = client.connectPubSub(ByteArrayCodec.INSTANCE).reactive()
         LettuceRedisClient(client, asyncClient, reactive)
