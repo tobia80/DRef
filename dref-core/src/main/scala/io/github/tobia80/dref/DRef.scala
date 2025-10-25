@@ -309,7 +309,9 @@ object DRef {
                                 .interruptWhen(aliveInterruptStream)
                                 .collectZIO { case StolenElement(name) =>
                                   ZIO.logError(s"Stolen lock ${name} with value $lockValue") *>
-                                    stolen.set(true) *> fFiber.interrupt *>
+                                    stolen.set(true) *>
+                                    aliveInterruptStream.succeed(()) *>
+                                    fFiber.interrupt *>
                                     ZIO.fail(LockStolenException(name, lockValue))
                                 }
                                 .runDrain
