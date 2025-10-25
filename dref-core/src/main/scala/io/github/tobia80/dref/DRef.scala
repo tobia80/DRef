@@ -97,18 +97,21 @@ trait DRefContext {
   def onChangeStream(name: String): ZStream[Any, Throwable, ChangeEvent]
 
   def detectDeletionFromUnderlyingStream(
-    name: String,
-    value: Array[Byte]
+    name: String
   ): ZStream[Any, Throwable, DeleteElement]
 
+  def detectStolenElement(name: String, value: Array[Byte]): ZStream[Any, Throwable, StolenElement]
+
 }
+
+case class StolenElement(name: String)
 
 sealed trait ChangeEvent {
   def name: String
 }
 
 case class SetElement(name: String, value: Array[Byte]) extends ChangeEvent
-case class DeleteElement(name: String, stolen: Boolean) extends ChangeEvent
+case class DeleteElement(name: String) extends ChangeEvent
 
 private case class ExpiringValue(value: Array[Byte], expireAt: Option[Long])
 
@@ -177,14 +180,15 @@ object DRefContext {
 
     override def deleteElement(name: String): Task[Unit] = ref.update { el =>
       el.removed(name)
-    } *> changes.offer(DeleteElement(name, false)).unit
+    } *> changes.offer(DeleteElement(name)).unit
 
     override def defaultTtl: Duration = 5.seconds
 
     override def detectDeletionFromUnderlyingStream(
-      name: String,
-      value: Array[Byte]
+      name: String
     ): ZStream[Any, Throwable, DeleteElement] = ZStream.never
+
+    override def detectStolenElement(name: String, value: Array[Byte]): ZStream[Any, Throwable, StolenElement] = ZStream.never
   })
 }
 
@@ -279,15 +283,16 @@ object DRef {
       defaultTtl            = context.defaultTtl
       gainedLock           <- context.setElementIfNotExist(name, lockValueBytes, Some(defaultTtl))
       interruptStream      <- Promise.make[Throwable, Unit]
+      stolen               <- Ref.make(false)
       aliveInterruptStream <- Promise.make[Throwable, Unit]
       _                    <- ZStream
                                 .mergeAll(2)(
                                   context // attempt to gain lock when delete element happens, if not keep listening otherwise terminate stream
                                     .onChangeStream(name),
-                                  context.detectDeletionFromUnderlyingStream(name, lockValueBytes)
+                                  context.detectDeletionFromUnderlyingStream(name)
                                 )
                                 .interruptWhen(interruptStream)
-                                .collectZIO { case DeleteElement(name, _) => // works when lock is lost?
+                                .collectZIO { case DeleteElement(name) => // works when lock is lost?
                                   for {
                                     _          <- ZIO.logInfo(s"Lock $name was deleted, trying to gain it")
                                     lockedGain <- context.setElementIfNotExist(name, lockValueBytes, Some(defaultTtl))
@@ -299,11 +304,11 @@ object DRef {
       _                    <- ZIO.logInfo(s"Lock $name acquired")
       fFiber               <- f.fork
       stolenLockFiber      <- context // lock stolen detection, if so throws exception
-                                .detectDeletionFromUnderlyingStream(name, lockValueBytes)
+                                .detectStolenElement(name, lockValueBytes)
                                 .interruptWhen(aliveInterruptStream)
-                                .collectZIO { case DeleteElement(_, true) =>
+                                .collectZIO { case StolenElement(name) =>
                                   ZIO.logError(s"Stolen lock ${name} with value $lockValue") *>
-                                    fFiber.interrupt *>
+                                    stolen.set(true) *> fFiber.interrupt *>
                                     ZIO.fail(LockStolenException(name, lockValue))
                                 }
                                 .runDrain
@@ -318,13 +323,16 @@ object DRef {
                                 }
                                 .ensuring {
                                   aliveInterruptStream.succeed(()) *>
-                                    context
-                                      .deleteElement(name)
-                                      .tapBoth(
-                                        err => ZIO.logError(s"Error releasing lock $name: ${err.getMessage}"),
-                                        _ => ZIO.logInfo(s"Lock $name released")
-                                      )
-                                      .ignore
+                                    stolen.get.flatMap { hasBeenStolen =>
+                                      context
+                                        .deleteElement(name)
+                                        .tapBoth(
+                                          err => ZIO.logError(s"Error releasing lock $name: ${err.getMessage}"),
+                                          _ => ZIO.logInfo(s"Lock $name released")
+                                        )
+                                        .ignore
+                                        .unless(hasBeenStolen)
+                                    }
                                 }
     } yield result
 

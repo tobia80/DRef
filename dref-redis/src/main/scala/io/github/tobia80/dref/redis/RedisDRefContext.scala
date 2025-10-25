@@ -141,31 +141,23 @@ object RedisDRefContext {
       override def onChangeStream(name: String): ZStream[Any, Throwable, ChangeEvent] =
         ZStream.logDebug(s"Subscribing to $name") *> ZStream.fromHub(hub).flattenTake.collect {
           case c @ ChangePayload(_, value, false) if c.nameString == name => SetElement(name, value.toArray)
-          case c @ ChangePayload(_, value, true) if c.nameString == name  => DeleteElement(name, false)
+          case c @ ChangePayload(_, value, true) if c.nameString == name  => DeleteElement(name)
         }
-
-      enum ValueStatus {
-        case Present
-        case Deleted
-        case Stolen
-      }
 
       override def detectDeletionFromUnderlyingStream(
-        name: String,
-        originalValue: Array[Byte]
+        name: String
       ): ZStream[Any, Throwable, DeleteElement] = {
-        val valueStatus = for {
+        val notExist = for {
           result <- redisClient.get(Chunk.fromArray(name.getBytes))
-          res     = result match {
-                      case Some(value) if value.toArray sameElements originalValue    => ValueStatus.Present
-                      case Some(value) if !(value.toArray sameElements originalValue) => ValueStatus.Stolen
-                      case _                                                          => ValueStatus.Deleted
-                    }
-        } yield res
-        ZStream.repeatZIO(valueStatus.delay(1.second)).collect {
-          case ValueStatus.Stolen  => DeleteElement(name, true)
-          case ValueStatus.Deleted => DeleteElement(name, false)
-        }
+        } yield result.isEmpty
+        ZStream.repeatZIO(notExist.delay(1.second)).filter(identity).as(DeleteElement(name))
+      }
+
+      override def detectStolenElement(name: String, value: Array[Byte]): ZStream[Any, Throwable, StolenElement] = {
+        val stolen = for {
+          result <- redisClient.get(Chunk.fromArray(name.getBytes))
+        } yield result.exists(el => !(el.toArray sameElements value))
+        ZStream.repeatZIO(stolen.delay(1.second)).filter(identity).as(StolenElement(name))
       }
     }
   )

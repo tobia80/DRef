@@ -61,7 +61,7 @@ class DRefStateMachine(streamBuilder: Sinks.Many[ChangeEvent]) extends StateMach
 
   private def deleteElement(commitIndex: Long, operation: DeleteElementRequest): Option[Array[Byte]] = {
     val res = innerMap.remove(operation.name)
-    streamBuilder.tryEmitNext(DeleteElement(operation.name, false))
+    streamBuilder.tryEmitNext(DeleteElement(operation.name))
     res.map(_.value)
   }
 
