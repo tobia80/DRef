@@ -22,6 +22,8 @@ custom replication logic, retry loops, or bespoke consensus code.
   sync across nodes while minimising bandwidth by shipping deltas.
 - **Locking & notifications built-in.** Use distributed locks for mutual
   exclusion or subscribe to change streams to broadcast domain events.
+- **Redis lock steal detection.** Detects and recovers from stale lock holders
+  when using the Redis backend so clusters stay responsive under node churn.
 - **Backend flexibility.** Switch between Raft, Redis, or in-memory
   implementations to match the deployment environment.
 - **Codec agnostic.** Bring your own codecs (e.g. Desert or MsgPack) to talk to

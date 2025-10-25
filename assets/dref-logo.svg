@@ -6,6 +6,18 @@
     <path d="M86 44C97.0457 44 106 52.9543 106 64C106 75.0457 97.0457 84 86 84H78V44H86Z" fill="#415A77"/>
     <path d="M96 56C100.971 56 105 60.0294 105 65C105 69.9706 100.971 74 96 74H90V56H96Z" fill="#E0E1DD"/>
   </g>
+  <g stroke="#778DA9" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="42" y1="60" x2="70" y2="40"/>
+    <line x1="42" y1="60" x2="70" y2="80"/>
+    <line x1="70" y1="40" x2="98" y2="60"/>
+    <line x1="70" y1="80" x2="98" y2="60"/>
+  </g>
+  <g>
+    <circle cx="42" cy="60" r="12" fill="#E0E1DD"/>
+    <circle cx="70" cy="40" r="10" fill="#415A77"/>
+    <circle cx="70" cy="80" r="10" fill="#415A77"/>
+    <circle cx="98" cy="60" r="11" fill="#1B263B" stroke="#E0E1DD" stroke-width="2"/>
+  </g>
   <g filter="url(#glow)">
     <text x="140" y="69" fill="#E0E1DD" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="48" font-weight="700">DRef</text>
   </g>
