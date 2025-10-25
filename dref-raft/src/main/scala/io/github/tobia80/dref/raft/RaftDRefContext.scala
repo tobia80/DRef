@@ -323,7 +323,20 @@ object RaftDRefContext {
     override def defaultTtl: Duration = config.ttl.getOrElse(20.seconds)
 
     override def detectDeletionFromUnderlyingStream(
-      name: String
-    ): ZStream[Any, Throwable, DeleteElement] = ZStream.never
+      name: String,
+      originalValue: Array[Byte]
+    ): ZStream[Any, Throwable, DeleteElement] = {
+      val checkStatus = for {
+        current <- getElement(name)
+        res      = current match {
+                     case Some(value) if value sameElements originalValue => false
+                     case Some(_)                                         => true // Value changed (stolen)
+                     case None                                            => false // Deleted
+                   }
+      } yield res
+      ZStream.repeatZIO(checkStatus.delay(100.millis)).collect { case true =>
+        DeleteElement(name, true)
+      }
+    }
   })
 }

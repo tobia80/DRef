@@ -61,14 +61,13 @@ class LettuceRedisClient(
         )
     )
 
-  override def setNx(name: Chunk[Byte], value: Chunk[Byte], ttl: Option[Duration]): Task[Boolean] = {
+  override def setNx(name: Chunk[Byte], value: Chunk[Byte], ttl: Option[Duration]): Task[Boolean] =
     ttl match {
       case Some(duration) =>
         val setArgs = SetArgs.Builder.nx.ex(duration.getSeconds)
         ZIO.fromCompletionStage(async.set(name.toArray, value.toArray, setArgs)).map(res => res != null)
-      case None => ZIO.fromCompletionStage(async.setnx(name.toArray, value.toArray)).map(res => res.booleanValue())
+      case None           => ZIO.fromCompletionStage(async.setnx(name.toArray, value.toArray)).map(res => res.booleanValue())
     }
-  }
 
   override def get(name: Chunk[Byte]): Task[Option[Chunk[Byte]]] =
     ZIO.fromCompletionStage(async.get(name.toArray)).map(Option(_).map(Chunk.fromArray))

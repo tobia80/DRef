@@ -141,16 +141,31 @@ object RedisDRefContext {
       override def onChangeStream(name: String): ZStream[Any, Throwable, ChangeEvent] =
         ZStream.logDebug(s"Subscribing to $name") *> ZStream.fromHub(hub).flattenTake.collect {
           case c @ ChangePayload(_, value, false) if c.nameString == name => SetElement(name, value.toArray)
-          case c @ ChangePayload(_, value, true) if c.nameString == name  => DeleteElement(name)
+          case c @ ChangePayload(_, value, true) if c.nameString == name  => DeleteElement(name, false)
         }
 
+      enum ValueStatus {
+        case Present
+        case Deleted
+        case Stolen
+      }
+
       override def detectDeletionFromUnderlyingStream(
-        name: String
+        name: String,
+        originalValue: Array[Byte]
       ): ZStream[Any, Throwable, DeleteElement] = {
-        val notExist = for {
+        val valueStatus = for {
           result <- redisClient.get(Chunk.fromArray(name.getBytes))
-        } yield result.isEmpty
-        ZStream.repeatZIO(notExist.delay(1.second)).filter(identity).as(DeleteElement(name))
+          res     = result match {
+                      case Some(value) if value.toArray sameElements originalValue    => ValueStatus.Present
+                      case Some(value) if !(value.toArray sameElements originalValue) => ValueStatus.Stolen
+                      case _                                                          => ValueStatus.Deleted
+                    }
+        } yield res
+        ZStream.repeatZIO(valueStatus.delay(1.second)).collect {
+          case ValueStatus.Stolen  => DeleteElement(name, true)
+          case ValueStatus.Deleted => DeleteElement(name, false)
+        }
       }
     }
   )
