@@ -6,6 +6,8 @@ import zio.*
 import zio.schema.{DeriveSchema, Schema}
 import zio.stream.{Take, ZStream}
 
+import java.util
+
 case class RedisConfig(
   host: String,
   port: Int,
@@ -156,7 +158,7 @@ object RedisDRefContext {
       override def detectStolenElement(name: String, value: Array[Byte]): ZStream[Any, Throwable, StolenElement] = {
         val stolen = for {
           result <- redisClient.get(Chunk.fromArray(name.getBytes))
-        } yield result.exists(el => !(el.toArray sameElements value))
+        } yield result.exists(el => !(util.Arrays.equals(el.toArray, value)))
         ZStream.repeatZIO(stolen.delay(1.second)).filter(identity).as(StolenElement(name))
       }
     }
