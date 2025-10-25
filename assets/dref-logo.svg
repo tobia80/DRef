@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="320" height="120" viewBox="0 0 320 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="320" height="120" rx="16" fill="#0D1B2A"/>
+  <g filter="url(#glow)">
+    <path d="M64 32H96C112.569 32 126 45.4315 126 62C126 78.5685 112.569 92 96 92H64V32Z" fill="#1B263B"/>
+    <path d="M86 44C97.0457 44 106 52.9543 106 64C106 75.0457 97.0457 84 86 84H78V44H86Z" fill="#415A77"/>
+    <path d="M96 56C100.971 56 105 60.0294 105 65C105 69.9706 100.971 74 96 74H90V56H96Z" fill="#E0E1DD"/>
+  </g>
+  <g filter="url(#glow)">
+    <text x="140" y="69" fill="#E0E1DD" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="48" font-weight="700">DRef</text>
+  </g>
+  <defs>
+    <filter id="glow" x="0" y="0" width="320" height="120" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
+</svg>

@@ -5,6 +5,8 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Scala Version](https://img.shields.io/badge/Scala-3.7.3-DC322F?logo=scala)](https://www.scala-lang.org/)
 
+![DRef Logo](assets/dref-logo.svg)
+
 Distributed Ref (DRef) is a toolkit for synchronising state and coordination
 primitives across clusters of ZIO applications. It lets you treat distributed
 state the same way you would work with an ordinary `Ref`, while also giving you
