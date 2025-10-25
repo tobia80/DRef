@@ -43,11 +43,11 @@ val redisDeps = Seq(
 val raftDeps = Seq(
   "io.microraft"                   % "microraft"     % "0.7",
   "com.thesamet.scalapb.zio-grpc" %% "zio-grpc-core" % "0.6.3",
-  "org.apache.commons"             % "commons-lang3" % "3.18.0",
-  "io.projectreactor"              % "reactor-core"  % "3.7.11",
+  "org.apache.commons"             % "commons-lang3" % "3.19.0",
+  "io.projectreactor"              % "reactor-core"  % "3.7.12",
 
   // grpc
-  "io.grpc"               % "grpc-netty"           % "1.75.0",
+  "io.grpc"               % "grpc-netty"           % "1.76.0",
   "com.thesamet.scalapb" %% "scalapb-runtime-grpc" % scalapb.compiler.Version.scalapbVersion
 ) ++ testDeps
 

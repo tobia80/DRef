@@ -319,7 +319,12 @@ object DRef {
                                 .flatMap {
                                   case zio.Exit.Success(value)                            => ZIO.succeed(value)
                                   case zio.Exit.Failure(cause) if cause.isInterruptedOnly =>
-                                    stolenLockFiber.join.as(throw new RuntimeException("This should not be reached"))
+                                    stolen.get.flatMap { beenStolen =>
+                                      if beenStolen then
+                                        stolenLockFiber.join
+                                          .as(throw new RuntimeException("This should not be reached"))
+                                      else ZIO.failCause(cause)
+                                    }
                                   case zio.Exit.Failure(cause)                            => ZIO.failCause(cause)
                                 }
                                 .ensuring {
