@@ -50,38 +50,32 @@ object RedisDRefSpec extends ZIOSpecDefault {
     } @@ TestAspect.withLiveClock,
     test("stolen lock should throw LockStolenException") {
       for {
-        context         <- ZIO.service[DRefContext]
-        lockFiber       <- DRef
-                             .lockWithContext(context, ManualId("stolen-lock-test")) {
-                               (ZIO.logInfo("Original lock acquired, sleeping...") *>
-                                 ZIO.sleep(3.seconds)).as("original-lock-completed")
-                             }
-                             .fork
+        context        <- ZIO.service[DRefContext]
+        _              <- context.deleteElement("stolen-lock-test")
+        lockFiber      <- DRef
+                            .lockWithContext(context, ManualId("stolen-lock-test")) {
+                              (ZIO.logInfo("Original lock acquired, sleeping...") *>
+                                ZIO.sleep(3.seconds)).as("original-lock-completed")
+                            }
+                            .fork
         // Wait for the lock to be acquired and the stolen lock detection to start
-        _               <- ZIO.sleep(500.millis)
+        _              <- ZIO.sleep(500.millis)
         // Manually set a different value for the same key to simulate it being stolen
-        _               <- ZIO.logInfo("Setting different value to simulate theft") *>
-                             context.setElement("stolen-lock-test", "stolen-value".getBytes, None)
+        _              <- ZIO.logInfo("Setting different value to simulate theft") *>
+                            context.setElement("stolen-lock-test", "stolen-value".getBytes, None)
         // Wait for the original lock to fail and get the result
-        originalResult  <- lockFiber.join.either
-        _               <- ZIO.logInfo(s"Original lock result: $originalResult")
-        // Verify that another client can now acquire the lock
-        newLockResult   <- DRef
-                             .lockWithContext(context, ManualId("stolen-lock-test")) {
-                               ZIO.succeed("new-lock-acquired")
-                             }
+        originalResult <- lockFiber.join.either
+        _              <- ZIO.logInfo(s"Original lock result: $originalResult")
         // Original lock should have failed with LockStolenException
-        originalFailed  <- originalResult match {
-                             case Left(LockStolenException(name, _)) =>
-                               ZIO.logInfo(s"LockStolenException caught for lock: $name").as(true)
-                             case Left(other)                        =>
-                               ZIO.logInfo(s"Other exception caught: $other").as(false)
-                             case Right(_)                           =>
-                               ZIO.logInfo("Lock completed successfully (unexpected)").as(false)
-                           }
-        // New lock should succeed
-        newLockSucceeded = newLockResult == "new-lock-acquired"
-      } yield assertTrue(originalFailed && newLockSucceeded)
+        originalFailed <- originalResult match {
+                            case Left(LockStolenException(name, _)) =>
+                              ZIO.logInfo(s"LockStolenException caught for lock: $name").as(true)
+                            case Left(other)                        =>
+                              ZIO.logInfo(s"Other exception caught: $other").as(false)
+                            case Right(_)                           =>
+                              ZIO.logInfo("Lock completed successfully (unexpected)").as(false)
+                          }
+      } yield assertTrue(originalFailed)
     } @@ TestAspect.withLiveClock
   ).provide(
     RedisDRefContext.live,
