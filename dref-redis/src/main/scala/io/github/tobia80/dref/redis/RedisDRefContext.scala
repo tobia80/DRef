@@ -156,9 +156,14 @@ object RedisDRefContext {
       }
 
       override def detectStolenElement(name: String, value: Array[Byte]): ZStream[Any, Throwable, StolenElement] = {
+        val change = ChangePayload(name = Chunk.fromArray(name.getBytes), value = Chunk.fromArray(value))
         val stolen = for {
-          result <- redisClient.get(Chunk.fromArray(name.getBytes))
-        } yield result.exists(el => !(util.Arrays.equals(el.toArray, value)))
+          valueToCheck <-
+            DRefCodec
+              .serializeToArray[ChangePayload](change)
+              .mapError(err => new Exception(s"Cannot serialize notification ($change) (Error: ${err.getMessage})"))
+          result       <- redisClient.get(Chunk.fromArray(name.getBytes))
+        } yield result.exists(el => !(util.Arrays.equals(el.toArray, valueToCheck)))
         ZStream.repeatZIO(stolen.delay(1.second)).filter(identity).as(StolenElement(name))
       }
     }
