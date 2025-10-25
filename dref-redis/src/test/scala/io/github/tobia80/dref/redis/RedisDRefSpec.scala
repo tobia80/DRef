@@ -75,6 +75,7 @@ object RedisDRefSpec extends ZIOSpecDefault {
                             case Right(_)                           =>
                               ZIO.logInfo("Lock completed successfully (unexpected)").as(false)
                           }
+        // New lock should succeed
       } yield assertTrue(originalFailed)
     } @@ TestAspect.withLiveClock
   ).provide(
