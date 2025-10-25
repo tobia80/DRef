@@ -1,5 +1,10 @@
 # DRef
 
+[![Scala CI](https://github.com/tobia80/DRef/actions/workflows/scala.yml/badge.svg)](https://github.com/tobia80/DRef/actions/workflows/scala.yml)
+[![Maven Central](https://img.shields.io/maven-central/v/io.github.tobia80/dref_3.svg?logo=sonatype)](https://central.sonatype.com/artifact/io.github.tobia80/dref_3)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Scala Version](https://img.shields.io/badge/Scala-3.7.3-DC322F?logo=scala)](https://www.scala-lang.org/)
+
 Distributed Ref (DRef) is a toolkit for synchronising state and coordination
 primitives across clusters of ZIO applications. It lets you treat distributed
 state the same way you would work with an ordinary `Ref`, while also giving you
