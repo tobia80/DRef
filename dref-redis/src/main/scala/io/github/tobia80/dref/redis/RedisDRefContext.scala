@@ -6,6 +6,8 @@ import zio.*
 import zio.schema.{DeriveSchema, Schema}
 import zio.stream.{Take, ZStream}
 
+import java.util
+
 case class RedisConfig(
   host: String,
   port: Int,
@@ -151,6 +153,18 @@ object RedisDRefContext {
           result <- redisClient.get(Chunk.fromArray(name.getBytes))
         } yield result.isEmpty
         ZStream.repeatZIO(notExist.delay(1.second)).filter(identity).as(DeleteElement(name))
+      }
+
+      override def detectStolenElement(name: String, value: Array[Byte]): ZStream[Any, Throwable, StolenElement] = {
+        val change = ChangePayload(name = Chunk.fromArray(name.getBytes), value = Chunk.fromArray(value))
+        val stolen = for {
+          valueToCheck <-
+            DRefCodec
+              .serializeToArray[ChangePayload](change)
+              .mapError(err => new Exception(s"Cannot serialize notification ($change) (Error: ${err.getMessage})"))
+          result       <- redisClient.get(Chunk.fromArray(name.getBytes))
+        } yield result.forall(el => !util.Arrays.equals(el.toArray, valueToCheck))
+        ZStream.repeatZIO(stolen.delay(1.second)).filter(identity).as(StolenElement(name))
       }
     }
   )

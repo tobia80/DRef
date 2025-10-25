@@ -325,5 +325,8 @@ object RaftDRefContext {
     override def detectDeletionFromUnderlyingStream(
       name: String
     ): ZStream[Any, Throwable, DeleteElement] = ZStream.never
+
+    override def detectStolenElement(name: String, value: Array[Byte]): ZStream[Any, Throwable, StolenElement] =
+      ZStream.never
   })
 }
