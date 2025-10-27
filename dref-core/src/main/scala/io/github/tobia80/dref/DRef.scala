@@ -287,6 +287,7 @@ object DRef {
       stolen                    <- Ref.make(false)
       aliveInterruptStream      <- Promise.make[Throwable, Unit]
       stolenLockInterruptStream <- Promise.make[Throwable, Unit]
+      stolenLockException       <- Promise.make[Throwable, LockStolenException]
       _                         <- ZStream
                                      .mergeAll(2)(
                                        context // attempt to gain lock when delete element happens, if not keep listening otherwise terminate stream
@@ -309,10 +310,11 @@ object DRef {
                                      .detectStolenElement(name, lockValueBytes)
                                      .interruptWhen(stolenLockInterruptStream)
                                      .collectZIO { case StolenElement(name) =>
+                                       val exception = LockStolenException(name, lockValue)
                                        stolen.set(true) *>
+                                         stolenLockException.succeed(exception) *>
                                          aliveInterruptStream.succeed(()) *>
-                                         fFiber.interrupt *>
-                                         ZIO.fail(LockStolenException(name, lockValue))
+                                         fFiber.interrupt
                                      }
                                      .runDrain
                                      .fork
@@ -323,8 +325,8 @@ object DRef {
                                        case zio.Exit.Failure(cause) if cause.isInterruptedOnly =>
                                          stolen.get.flatMap { beenStolen =>
                                            if beenStolen then
-                                             ZIO.logError(s"Stolen lock ${name} with value $lockValue") *> stolenLockFiber.join
-                                               .as(throw new RuntimeException("This should not be reached"))
+                                             ZIO.logError(s"Stolen lock ${name} with value $lockValue") *> 
+                                             stolenLockException.await.flatMap(ZIO.fail(_))
                                            else ZIO.failCause(cause)
                                          }
                                        case zio.Exit.Failure(cause)                            => ZIO.failCause(cause)
