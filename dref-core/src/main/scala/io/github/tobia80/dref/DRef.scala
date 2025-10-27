@@ -268,80 +268,80 @@ object DRef {
     f: => RIO[R, T]
   )(implicit trace: Trace): RIO[R, T] =
     for {
-      stack                <- ZIO.stackTrace
-      hash                 <- sha(stack.prettyPrint)
-      traceInfo            <-
+      stack                     <- ZIO.stackTrace
+      hash                      <- sha(stack.prettyPrint)
+      traceInfo                 <-
         ZIO.fromOption(instance.unapply(trace)).orElseFail(new Throwable("No trace available"))
-      lockValue            <- Random.nextLong
-      lockValueBytes       <- fromEither(serializeToArray(lockValue)).mapError(failure => new Throwable(failure.message))
-      location              = traceInfo._1
-      file                  = traceInfo._2
-      line                  = traceInfo._3
-      name                  = id match {
-                                case AutoId       => s"$location:$file:$line ($hash)"
-                                case ManualId(id) => id
-                              }
-      defaultTtl            = context.defaultTtl
-      gainedLock           <- context.setElementIfNotExist(name, lockValueBytes, Some(defaultTtl))
-      interruptStream      <- Promise.make[Throwable, Unit]
-      stolen               <- Ref.make(false)
-      aliveInterruptStream <- Promise.make[Throwable, Unit]
-      _                    <- ZStream
-                                .mergeAll(2)(
-                                  context // attempt to gain lock when delete element happens, if not keep listening otherwise terminate stream
-                                    .onChangeStream(name),
-                                  context.detectDeletionFromUnderlyingStream(name)
-                                )
-                                .interruptWhen(interruptStream)
-                                .collectZIO { case DeleteElement(name) => // works when lock is lost?
-                                  for {
-                                    _          <- ZIO.logInfo(s"Lock $name was deleted, trying to gain it")
-                                    lockedGain <- context.setElementIfNotExist(name, lockValueBytes, Some(defaultTtl))
-                                    _          <- interruptStream.succeed(()).when(lockedGain)
-                                  } yield ()
-                                }
-                                .runDrain
-                                .unless(gainedLock)
-      _                    <- ZIO.logInfo(s"Lock $name acquired")
-      fFiber               <- f.fork
-      stolenLockFiber      <- context // lock stolen detection, if so throws exception
-                                .detectStolenElement(name, lockValueBytes)
-                                .interruptWhen(aliveInterruptStream)
-                                .collectZIO { case StolenElement(name) =>
-                                  ZIO.logError(s"Stolen lock ${name} with value $lockValue") *>
-                                    stolen.set(true) *>
-                                    aliveInterruptStream.succeed(()) *>
-                                    fFiber.interrupt *>
-                                    ZIO.fail(LockStolenException(name, lockValue))
-                                }
-                                .runDrain
-                                .fork
-      aliveFiber           <- context.keepAliveStream(name, defaultTtl).interruptWhen(aliveInterruptStream).runDrain.fork
-      result               <- fFiber.await
-                                .flatMap {
-                                  case zio.Exit.Success(value)                            => ZIO.succeed(value)
-                                  case zio.Exit.Failure(cause) if cause.isInterruptedOnly =>
-                                    stolen.get.flatMap { beenStolen =>
-                                      if beenStolen then
-                                        stolenLockFiber.join
-                                          .as(throw new RuntimeException("This should not be reached"))
-                                      else ZIO.failCause(cause)
-                                    }
-                                  case zio.Exit.Failure(cause)                            => ZIO.failCause(cause)
-                                }
-                                .ensuring {
-                                  aliveInterruptStream.succeed(()) *>
-                                    stolen.get.flatMap { hasBeenStolen =>
-                                      context
-                                        .deleteElement(name)
-                                        .tapBoth(
-                                          err => ZIO.logError(s"Error releasing lock $name: ${err.getMessage}"),
-                                          _ => ZIO.logInfo(s"Lock $name released")
-                                        )
-                                        .ignore
-                                        .unless(hasBeenStolen)
-                                    }
-                                }
+      lockValue                 <- Random.nextLong
+      lockValueBytes            <- fromEither(serializeToArray(lockValue)).mapError(failure => new Throwable(failure.message))
+      location                   = traceInfo._1
+      file                       = traceInfo._2
+      line                       = traceInfo._3
+      name                       = id match {
+                                     case AutoId       => s"$location:$file:$line ($hash)"
+                                     case ManualId(id) => id
+                                   }
+      defaultTtl                 = context.defaultTtl
+      gainedLock                <- context.setElementIfNotExist(name, lockValueBytes, Some(defaultTtl))
+      interruptStream           <- Promise.make[Throwable, Unit]
+      stolen                    <- Ref.make(false)
+      aliveInterruptStream      <- Promise.make[Throwable, Unit]
+      stolenLockInterruptStream <- Promise.make[Throwable, Unit]
+      _                         <- ZStream
+                                     .mergeAll(2)(
+                                       context // attempt to gain lock when delete element happens, if not keep listening otherwise terminate stream
+                                         .onChangeStream(name),
+                                       context.detectDeletionFromUnderlyingStream(name)
+                                     )
+                                     .interruptWhen(interruptStream)
+                                     .collectZIO { case DeleteElement(name) => // works when lock is lost?
+                                       for {
+                                         _          <- ZIO.logInfo(s"Lock $name was deleted, trying to gain it")
+                                         lockedGain <- context.setElementIfNotExist(name, lockValueBytes, Some(defaultTtl))
+                                         _          <- interruptStream.succeed(()).when(lockedGain)
+                                       } yield ()
+                                     }
+                                     .runDrain
+                                     .unless(gainedLock)
+      _                         <- ZIO.logInfo(s"Lock $name acquired")
+      fFiber                    <- f.fork
+      stolenLockFiber           <- context // lock stolen detection, if so throws exception
+                                     .detectStolenElement(name, lockValueBytes)
+                                     .interruptWhen(stolenLockInterruptStream)
+                                     .collectZIO { case StolenElement(name) =>
+                                       stolen.set(true) *>
+                                         aliveInterruptStream.succeed(()) *>
+                                         fFiber.interrupt *>
+                                         ZIO.fail(LockStolenException(name, lockValue))
+                                     }
+                                     .runDrain
+                                     .fork
+      aliveFiber                <- context.keepAliveStream(name, defaultTtl).interruptWhen(aliveInterruptStream).runDrain.fork
+      result                    <- fFiber.await
+                                     .flatMap {
+                                       case zio.Exit.Success(value)                            => ZIO.succeed(value)
+                                       case zio.Exit.Failure(cause) if cause.isInterruptedOnly =>
+                                         stolen.get.flatMap { beenStolen =>
+                                           if beenStolen then
+                                             ZIO.logError(s"Stolen lock ${name} with value $lockValue") *> stolenLockFiber.join
+                                               .as(throw new RuntimeException("This should not be reached"))
+                                           else ZIO.failCause(cause)
+                                         }
+                                       case zio.Exit.Failure(cause)                            => ZIO.failCause(cause)
+                                     }
+                                     .ensuring {
+                                       aliveInterruptStream.succeed(()) *> stolenLockInterruptStream.succeed(()) *>
+                                         stolen.get.flatMap { hasBeenStolen =>
+                                           context
+                                             .deleteElement(name)
+                                             .tapBoth(
+                                               err => ZIO.logError(s"Error releasing lock $name: ${err.getMessage}"),
+                                               _ => ZIO.logInfo(s"Lock $name released")
+                                             )
+                                             .ignore
+                                             .unless(hasBeenStolen)
+                                         }
+                                     }
     } yield result
 
   def lock[R, A, T](id: IdProvider = AutoId)(f: => RIO[R, T])(implicit trace: Trace): RIO[DRefContext & R, T] =
