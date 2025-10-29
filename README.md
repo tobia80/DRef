@@ -5,8 +5,8 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Scala Version](https://img.shields.io/badge/Scala-3.7.3-DC322F?logo=scala)](https://www.scala-lang.org/)
 
-Distributed Ref (DRef) is a toolkit for synchronising state and coordination
-primitives across clusters of ZIO applications. It lets you treat distributed
+Distributed Ref (DRef) is a library for synchronising state and coordination
+primitives across distributed nodes in ZIO applications. It lets you treat distributed
 state the same way you would work with an ordinary `Ref`, while also giving you
 cluster-wide locks and change streams when you need stronger coordination.
 
@@ -16,8 +16,7 @@ custom replication logic, retry loops, or bespoke consensus code.
 ## Highlights
 - **Drop-in `Ref` semantics.** Work with a distributed value using familiar
   transactional combinators such as `get`, `set`, `update`, and `modifyZIO`.
-- **Strong consistency where it matters.** Raft-backed storage keeps state in
-  sync across nodes while minimising bandwidth by shipping deltas.
+- **Strong consistency where it matters.** State is changed in a strong consistent way, using proper backend primitives and guarantees
 - **Locking & notifications built-in.** Use distributed locks for mutual
   exclusion or subscribe to change streams to broadcast domain events.
 - **Backend flexibility.** Switch between Raft, Redis, or in-memory
@@ -29,14 +28,14 @@ custom replication logic, retry loops, or bespoke consensus code.
 DRef shines whenever you need low-latency coordination across JVM services. A
 few high-impact scenarios include:
 
-- **Leader election & failover.** Run one active worker per shard, fail over in
+- **Leader election & failover.** Run one active worker, fail over in
   seconds, and log who took over.
 - **Dynamic configuration flags.** Push feature toggles or rollout percentages
   to every node without redeploying.
 - **Cross-service task scheduling.** Coordinate which node processes a batch or
   ensure only one node runs a cron job at a time.
 - **Collaborative counters and stats.** Maintain cluster-wide metrics (e.g.
-  connected users, processed jobs) that update atomically from any node.
+  connected users, processed jobs, scheduled alerts) that update atomically from any node.
 - **Event notifications.** Fan-out domain events through change streams while
   sharing a strongly consistent reference to the latest state.
 
@@ -85,7 +84,7 @@ object LeaderElection extends ZIOAppDefault:
 
   override def run =
     (for
-      leadership <- DRef.make(WorkerState(None), id = ManualId("worker-leadership"))
+      leadership <- DRef.make(WorkerState(None))
       _          <- leadership.getAndUpdateZIO { state =>
                       state.leader.fold(
                         ZIO.succeed(state.copy(leader = Some(nodeId))) <*
@@ -112,7 +111,7 @@ final case class Flags(betaFeature: Boolean, rollout: Int)
 
 val program =
   (for
-    flags <- DRef.make(Flags(betaFeature = false, rollout = 0), ManualId("feature-flags"))
+    flags <- DRef.make(Flags(betaFeature = false, rollout = 0))
     _     <- flags.onChange(flag => ZIO.logInfo(s"Flags changed to $flag"))
     _     <- flags.set(Flags(betaFeature = true, rollout = 5))
   yield ()).provideLayer(DRefContext.local)
@@ -138,6 +137,8 @@ object ThrottledJob extends ZIOAppDefault:
 
 If another node attempts to run `ThrottledJob` at the same time, it will block
 until the lock is released (or fail fast if you wrap it with a timeout).
+`LockStolenException` is thrown if, for any reason due to backend specifics and long running locks, lock is lost.
+Retry can be applied to recover from LockStolenException.
 
 ### 4. Live dashboards powered by DRef
 Maintain shared counters that drive real-time dashboards:
