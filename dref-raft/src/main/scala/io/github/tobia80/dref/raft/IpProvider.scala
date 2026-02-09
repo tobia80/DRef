@@ -1,6 +1,6 @@
 package io.github.tobia80.dref.raft
 
-import zio.{Task, ZEnvironment, ZIO, ZLayer}
+import zio.{Task, ZIO, ZLayer}
 
 trait IpProvider {
   def findNodeAddresses(): Task[List[String]]
@@ -14,17 +14,9 @@ object IpProvider {
 
   def k8s(
       serviceName: String,
-      myAddress: String,
       namespace: String
   ): ZLayer[Any, Throwable, IpProvider] =
-    KubernetesIpProvider.live(serviceName, namespace).map { env =>
-      val delegate = env.get[IpProvider]
-      ZEnvironment(new IpProvider {
-        override def findNodeAddresses(): Task[List[String]] = delegate.findNodeAddresses()
-        override def findMyAddress(): Task[String]           = ZIO.succeed(myAddress)
-        override def expectedEndpoints: Task[Int]            = delegate.expectedEndpoints
-      })
-    }
+    KubernetesIpProvider.live(serviceName, namespace)
 
   def local: ZLayer[Any, Nothing, IpProvider] = ZLayer.succeed {
     new IpProvider {

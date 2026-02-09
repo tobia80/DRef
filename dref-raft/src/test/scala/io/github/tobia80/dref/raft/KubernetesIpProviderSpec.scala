@@ -37,9 +37,11 @@ object KubernetesIpProviderSpec extends ZIOSpecDefault {
     },
     test("findMyAddress should return local host address") {
       for {
-        svc     <- ZIO.service[Endpointses]
-        provider = KubernetesIpProvider.create(serviceName, namespace, svc)
-        myAddr  <- provider.findMyAddress()
+        svc      <- ZIO.service[Endpointses]
+        _        <- svc.create(makeEndpoints(serviceName, List("10.0.0.1", "10.0.0.2")), K8sNamespace(namespace))
+                       .mapError(e => RuntimeException(s"Failed to create test endpoints: $e"))
+        provider  = KubernetesIpProvider.create(serviceName, namespace, svc)
+        myAddr   <- provider.findMyAddress()
       } yield assertTrue(myAddr.nonEmpty)
     },
     test("expectedEndpoints should return the count of IPs") {

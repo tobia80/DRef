@@ -7,10 +7,20 @@ import com.coralogix.zio.k8s.client.model.K8sNamespace
 import com.coralogix.zio.k8s.client.K8sFailure
 import zio.*
 
+import java.net.{InetAddress, NetworkInterface}
+import scala.jdk.CollectionConverters.*
+
 object KubernetesIpProvider {
 
   private def k8sFailureToThrowable(failure: K8sFailure): Throwable =
     RuntimeException(s"Kubernetes API error: $failure")
+
+  private def localIps(): Set[String] =
+    NetworkInterface.getNetworkInterfaces.asScala
+      .flatMap(_.getInetAddresses.asScala)
+      .filterNot(_.isLoopbackAddress)
+      .map(_.getHostAddress)
+      .toSet
 
   def live(
       serviceName: String,
@@ -43,9 +53,16 @@ object KubernetesIpProvider {
             }.toList
           }
 
-      override def findMyAddress(): Task[String] = ZIO.attempt {
-        java.net.InetAddress.getLocalHost.getHostAddress
-      }
+      override def findMyAddress(): Task[String] =
+        findNodeAddresses().flatMap { endpointIps =>
+          ZIO.attempt {
+            val myIps = localIps()
+            endpointIps.find(myIps.contains)
+          }.flatMap {
+            case Some(ip) => ZIO.succeed(ip)
+            case None     => ZIO.attempt(InetAddress.getLocalHost.getHostAddress)
+          }
+        }
 
       override def expectedEndpoints: Task[Int] =
         findNodeAddresses().map(_.size)
