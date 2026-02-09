@@ -10,7 +10,13 @@ trait IpProvider {
   def expectedEndpoints: Task[Int]
 }
 
-object IpProvider { // TODO use k8s to retrieve ips for one service
+object IpProvider {
+
+  def k8s(
+      serviceName: String,
+      namespace: String
+  ): ZLayer[Any, Throwable, IpProvider] =
+    KubernetesIpProvider.live(serviceName, namespace)
 
   def local: ZLayer[Any, Nothing, IpProvider] = ZLayer.succeed {
     new IpProvider {

@@ -1,4 +1,4 @@
-import Dependencies.zio
+import Dependencies.{zio, zioK8s, sttp}
 
 import scala.collection.Seq
 
@@ -48,7 +48,11 @@ val raftDeps = Seq(
 
   // grpc
   "io.grpc"               % "grpc-netty"           % "1.76.0",
-  "com.thesamet.scalapb" %% "scalapb-runtime-grpc" % scalapb.compiler.Version.scalapbVersion
+  "com.thesamet.scalapb" %% "scalapb-runtime-grpc" % scalapb.compiler.Version.scalapbVersion,
+
+  // kubernetes service discovery
+  "com.coralogix"                    %% "zio-k8s-client" % zioK8s,
+  "com.softwaremill.sttp.client3"    %% "slf4j-backend"  % sttp
 ) ++ testDeps
 
 lazy val commonProtobufSettings = Seq(
