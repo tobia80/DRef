@@ -26,13 +26,7 @@ object KubernetesIpProvider {
       serviceName: String,
       namespace: String
   ): ZLayer[Any, Throwable, IpProvider] =
-    ZLayer.scoped {
-      for {
-        endpointsSvc <- ZIO
-                          .service[Endpointses]
-                          .provideLayer(k8sDefault >>> Endpointses.live)
-      } yield create(serviceName, namespace, endpointsSvc)
-    }
+    (k8sDefault >>> Endpointses.live) >>> ZLayer.fromFunction(create(serviceName, namespace, _))
 
   private[raft] def create(
       serviceName: String,
