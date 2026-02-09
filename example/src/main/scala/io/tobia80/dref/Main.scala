@@ -18,6 +18,9 @@ object Main extends ZIOAppDefault {
   private val NodesAddresses = "DREF_NODE_ADDRESSES"
   private val NodesServices = "DREF_NODE_SERVICES"
   private val PortEnvironment = "DREF_PORT"
+  private val K8sService   = "DREF_K8S_SERVICE"
+  private val K8sNamespace = "DREF_K8S_NAMESPACE"
+  private val K8sMyAddress = "DREF_K8S_MY_ADDRESS"
 
   private val raftConfigLayer: ZLayer[Any, Nothing, RaftConfig] = {
     val port = sys.env
@@ -28,15 +31,19 @@ object Main extends ZIOAppDefault {
     ZLayer.succeed(RaftConfig(port))
   }
 
-  private val ipProviderLayer: ZLayer[Any, Nothing, IpProvider] = {
+  private val ipProviderLayer: ZLayer[Any, Throwable, IpProvider] = {
     def parse(name: String): Option[Seq[String]] =
       sys.env
         .get(name)
         .map(_.split(',').map(_.trim).filter(_.nonEmpty).toSeq)
         .filter(_.nonEmpty)
 
-    parse(NodesAddresses)
-      .map(addresses => IpProvider.static(addresses*))
+    (for {
+      service   <- sys.env.get(K8sService)
+      myAddress <- sys.env.get(K8sMyAddress)
+      namespace <- sys.env.get(K8sNamespace)
+    } yield IpProvider.k8s(service, myAddress, namespace))
+      .orElse(parse(NodesAddresses).map(addresses => IpProvider.static(addresses*)))
       .orElse(parse(NodesServices).map(services => IpProvider.dnsBased(services*)))
       .getOrElse(IpProvider.local)
   }
