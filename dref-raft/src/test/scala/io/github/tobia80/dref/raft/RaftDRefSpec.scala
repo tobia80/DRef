@@ -54,6 +54,33 @@ object RaftDRefSpec extends ZIOSpecDefault {
         _                 <- fiber.join
         valueWithTwoLocks <- list.get
       } yield assertTrue(valueWithOneLock == List(100) && valueWithTwoLocks == List(100, 200))
+    },
+    test("stolen lock should throw LockStolenException") {
+      for {
+        context        <- ZIO.service[RaftDRefContext]
+        _              <- context.registerNode("other1")
+        _              <- context.registerNode("other2")
+        _              <- context.registerNode("other3")
+        _              <- context.deleteElement("stolen-lock-test").ignore
+        lockFiber      <- DRef
+                            .lockWithContext(context, ManualId("stolen-lock-test")) {
+                              (ZIO.logInfo("Original lock acquired, sleeping...") *>
+                                ZIO.sleep(5.seconds)).as("original-lock-completed")
+                            }
+                            .fork
+        _              <- ZIO.sleep(1.seconds)
+        _              <- ZIO.logInfo("Setting different value to simulate theft") *>
+                            context.setElement("stolen-lock-test", "stolen-value".getBytes, None)
+        originalResult <- lockFiber.join.either
+        originalFailed <- originalResult match {
+                            case Left(LockStolenException(name, _)) =>
+                              ZIO.logInfo(s"LockStolenException caught for lock: $name").as(true)
+                            case Left(other) =>
+                              ZIO.logInfo(s"Other exception caught: $other").as(false)
+                            case Right(_) =>
+                              ZIO.logInfo("Lock completed successfully (unexpected)").as(false)
+                          }
+      } yield assertTrue(originalFailed)
     }
   ).provide(
     RaftDRefContext.live,
