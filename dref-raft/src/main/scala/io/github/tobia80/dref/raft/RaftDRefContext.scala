@@ -133,7 +133,9 @@ object RaftDRefContext {
       _                     <- ZIO.logDebug(s"Expiring elements $elementsToDelete").when(elementsToDelete.nonEmpty)
       _                     <-
         ZIO
-          .foreach(elementsToDelete)(name => ZIO.fromCompletionStage(leaderNode.replicate(DeleteElementRequest(name))))
+          .foreach(elementsToDelete)(name =>
+            ZIO.fromCompletionStage(leaderNode.replicate(DeleteIfExpiredRequest(name, now)))
+          )
           .ignore
     } yield ()
 
@@ -324,9 +326,29 @@ object RaftDRefContext {
 
     override def detectDeletionFromUnderlyingStream(
       name: String
-    ): ZStream[Any, Throwable, DeleteElement] = ZStream.never
+    ): ZStream[Any, Throwable, DeleteElement] =
+      ZStream
+        .repeatZIOWithSchedule(
+          getElement(name).map {
+            case None => Some(DeleteElement(name))
+            case _    => None
+          },
+          Schedule.fixed(500.millis)
+        )
+        .collect { case Some(deleted) => deleted }
 
     override def detectStolenElement(name: String, value: Array[Byte]): ZStream[Any, Throwable, StolenElement] =
-      ZStream.never
+      ZStream
+        .repeatZIOWithSchedule(
+          getElement(name).map {
+            case Some(currentValue) if !java.util.Arrays.equals(currentValue, value) =>
+              Some(StolenElement(name))
+            case None =>
+              Some(StolenElement(name))
+            case _ => None
+          },
+          Schedule.fixed(500.millis)
+        )
+        .collect { case Some(stolen) => stolen }
   })
 }
