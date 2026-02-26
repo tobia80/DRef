@@ -25,6 +25,7 @@ class DRefStateMachine(streamBuilder: Sinks.Many[ChangeEvent]) extends StateMach
         setElementIfNotExist(commitIndex, request)
       case request: GetElementRequest           => getElement(commitIndex, request).orNull
       case request: DeleteElementRequest        => deleteElement(commitIndex, request).orNull
+      case request: DeleteIfExpiredRequest       => deleteIfExpired(commitIndex, request).orNull
       case request: ExpireElementRequest        => expireElement(commitIndex, request)
       case request: GetExpirationTableRequest   => retrieveExpirationTable(commitIndex, request)
       case request: StartNewTermOpProto         =>
@@ -35,7 +36,7 @@ class DRefStateMachine(streamBuilder: Sinks.Many[ChangeEvent]) extends StateMach
     }
 
   private def retrieveExpirationTable(commitIndex: Long, request: GetExpirationTableRequest) =
-    innerMap.map { case (name, ExpiringValue(_, Some(expireAt))) =>
+    innerMap.collect { case (name, ExpiringValue(_, Some(expireAt))) =>
       (name, expireAt)
     }.toMap
 
@@ -64,6 +65,15 @@ class DRefStateMachine(streamBuilder: Sinks.Many[ChangeEvent]) extends StateMach
     streamBuilder.tryEmitNext(DeleteElement(operation.name))
     res.map(_.value)
   }
+
+  private def deleteIfExpired(commitIndex: Long, operation: DeleteIfExpiredRequest): Option[Array[Byte]] =
+    innerMap.get(operation.name) match {
+      case Some(ExpiringValue(value, Some(expireAt))) if expireAt <= operation.expiredBefore =>
+        innerMap.remove(operation.name)
+        streamBuilder.tryEmitNext(DeleteElement(operation.name))
+        Some(value)
+      case _ => None
+    }
 
   private def expireElement(commitIndex: Long, operation: ExpireElementRequest): AnyRef = {
     val res = innerMap.get(operation.name)
