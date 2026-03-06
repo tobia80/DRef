@@ -8,6 +8,18 @@ import zio.stream.{Take, ZStream}
 
 import java.util
 
+case class RetryConfig(
+  maxRetries: Int = 5,
+  initialDelay: Duration = 200.millis,
+  maxDelay: Duration = 5.seconds
+)
+
+case class PoolConfig(
+  minIdle: Int = 1,
+  maxIdle: Int = 16,
+  maxTotal: Int = 16
+)
+
 case class RedisConfig(
   host: String,
   port: Int,
@@ -15,10 +27,12 @@ case class RedisConfig(
   username: Option[String],
   password: Option[String],
   caCert: Option[String],
-  ttl: Option[Duration]
+  ttl: Option[Duration],
+  retry: RetryConfig = RetryConfig(),
+  pool: PoolConfig = PoolConfig()
 ) {
 
-  def toRedisURI: String = {
+  def toRedisURI: RedisURI = {
     val builder = RedisURI.Builder
       .redis(host, port)
       .withDatabase(database)
@@ -30,10 +44,7 @@ case class RedisConfig(
       case _                  => ()
     }
 
-    builder
-      .build()
-      .toURI
-      .toString
+    builder.build()
   }
 
   def toOptions: ClientOptions = {

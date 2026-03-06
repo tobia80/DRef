@@ -37,7 +37,8 @@ val coreDeps = Seq(
 ) ++ testDeps
 
 val redisDeps = Seq(
-  "io.lettuce" % "lettuce-core" % "6.8.1.RELEASE"
+  "io.lettuce"         % "lettuce-core"  % "6.8.1.RELEASE",
+  "org.apache.commons" % "commons-pool2" % "2.12.0"
 ) ++ testDeps
 
 val raftDeps = Seq(
