@@ -1,7 +1,9 @@
 package io.github.tobia80.dref.redis
 
 import io.github.tobia80.dref.*
-import io.lettuce.core.{ClientOptions, RedisURI, SslOptions}
+import io.lettuce.core.{ClientOptions, RedisURI, SocketOptions, SslOptions, TimeoutOptions}
+import io.lettuce.core.ClientOptions.DisconnectedBehavior
+import io.lettuce.core.resource.{DefaultClientResources, Delay}
 import zio.*
 import zio.schema.{DeriveSchema, Schema}
 import zio.stream.{Take, ZStream}
@@ -15,14 +17,23 @@ case class RedisConfig(
   username: Option[String],
   password: Option[String],
   caCert: Option[String],
-  ttl: Option[Duration]
+  ttl: Option[Duration],
+  connectTimeout: Duration = 5.seconds,
+  commandTimeout: Duration = 10.seconds,
+  reconnectDelayMin: Duration = 100.millis,
+  reconnectDelayMax: Duration = 3.seconds,
+  requestQueueSize: Int = 1024
 ) {
 
-  def toRedisURI: String = {
+  private def asJavaDuration(duration: Duration): java.time.Duration =
+    java.time.Duration.ofNanos(duration.toNanos)
+
+  def toRedisURI: RedisURI = {
     val builder = RedisURI.Builder
       .redis(host, port)
       .withDatabase(database)
       .withSsl(caCert.isDefined)
+      .withTimeout(asJavaDuration(commandTimeout))
 
     (username, password) match {
       case (Some(u), Some(p)) => builder.withAuthentication(u, p.toCharArray)
@@ -32,12 +43,30 @@ case class RedisConfig(
 
     builder
       .build()
-      .toURI
-      .toString
   }
 
   def toOptions: ClientOptions = {
     val clientBuilder = ClientOptions.builder()
+      .autoReconnect(true)
+      .pingBeforeActivateConnection(true)
+      .requestQueueSize(requestQueueSize)
+      .disconnectedBehavior(DisconnectedBehavior.DEFAULT)
+      .replayFilter((command: io.lettuce.core.protocol.RedisCommand[?, ?, ?]) => command.getType.name() != "PUBLISH")
+      .socketOptions(
+        SocketOptions
+          .builder()
+          .connectTimeout(asJavaDuration(connectTimeout))
+          .keepAlive(true)
+          .tcpNoDelay(true)
+          .build()
+      )
+      .timeoutOptions(
+        TimeoutOptions
+          .builder()
+          .fixedTimeout(asJavaDuration(commandTimeout))
+          .build()
+      )
+
     caCert.foreach { cert =>
       clientBuilder.sslOptions(
         SslOptions.builder().trustManager(SslOptions.Resource.from(java.io.File(cert))).build()
@@ -45,6 +74,14 @@ case class RedisConfig(
     }
     clientBuilder.build()
   }
+
+  def toClientResources: DefaultClientResources =
+    DefaultClientResources
+      .builder()
+      .reconnectDelay(
+        Delay.exponential(asJavaDuration(reconnectDelayMin), asJavaDuration(reconnectDelayMax), 2, java.util.concurrent.TimeUnit.SECONDS)
+      )
+      .build()
 }
 
 object RedisConfig {
@@ -141,9 +178,18 @@ object RedisDRefContext {
         redisClient.get(Chunk.fromArray(name.getBytes)).map(_.map(_.toArray))
 
       override def onChangeStream(name: String): ZStream[Any, Throwable, ChangeEvent] =
-        ZStream.logDebug(s"Subscribing to $name") *> ZStream.fromHub(hub).flattenTake.collect {
-          case c @ ChangePayload(_, value, false) if c.nameString == name => SetElement(name, value.toArray)
-          case c @ ChangePayload(_, value, true) if c.nameString == name  => DeleteElement(name)
+        ZStream.logDebug(s"Subscribing to $name") *> {
+          val changes = ZStream.fromHub(hub).flattenTake.collect {
+            case c @ ChangePayload(_, value, false) if c.nameString == name => SetElement(name, value.toArray)
+            case c @ ChangePayload(_, value, true) if c.nameString == name  => DeleteElement(name)
+          }
+          val resync = redisClient.reconnections.mapZIO { _ =>
+            redisClient.get(Chunk.fromArray(name.getBytes)).map {
+              case Some(value) => SetElement(name, value.toArray): ChangeEvent
+              case None        => DeleteElement(name): ChangeEvent
+            }
+          }
+          changes merge resync
         }
 
       override def detectDeletionFromUnderlyingStream(
