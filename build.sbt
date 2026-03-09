@@ -2,7 +2,7 @@ import Dependencies.{zio, zioK8s, sttp}
 
 import scala.collection.Seq
 
-ThisBuild / version := "0.6.4"
+ThisBuild / version := "0.6.6"
 
 ThisBuild / scalaVersion := "3.7.3"
 
