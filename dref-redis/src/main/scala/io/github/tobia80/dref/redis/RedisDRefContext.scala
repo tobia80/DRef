@@ -39,7 +39,7 @@ case class RedisConfig(
   commandTimeout: Option[Duration] = None
 ) {
 
-  def toRedisURI: String = {
+  def toRedisURI: RedisURI = {
     val builder = RedisURI.Builder
       .redis(host, port)
       .withDatabase(database)
@@ -51,10 +51,9 @@ case class RedisConfig(
       case _                  => ()
     }
 
-    builder
-      .build()
-      .toURI
-      .toString
+    val uri = builder.build()
+    uri.setTimeout(java.time.Duration.ofMillis(socket.connectTimeout.toMillis))
+    uri
   }
 
   def toClientResources: DefaultClientResources = {
