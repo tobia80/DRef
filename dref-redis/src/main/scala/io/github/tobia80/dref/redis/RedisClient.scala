@@ -32,16 +32,25 @@ trait RedisClient {
 
 object RedisClient {
 
+  private def awaitNettyFuture(future: io.netty.util.concurrent.Future[?]): UIO[Unit] =
+    ZIO.async[Any, Nothing, Unit] { callback =>
+      future.addListener((_: io.netty.util.concurrent.Future[?]) => callback(ZIO.unit))
+    }
+
   def make(config: RedisConfig): ZIO[Scope, Throwable, RedisClient] =
-    ZIO.acquireRelease {
-      ZIO.attempt {
-        val client: core.RedisClient = core.RedisClient.create(config.toRedisURI)
-        client.setOptions(config.toOptions)
-        val asyncClient = client.connect(ByteArrayCodec.INSTANCE).async
-        val reactive = client.connectPubSub(ByteArrayCodec.INSTANCE).reactive()
-        LettuceRedisClient(client, asyncClient, reactive)
-      }
-    }(client => client.close().ignore)
+    ZIO.acquireRelease(ZIO.attempt(config.toClientResources))(res =>
+      awaitNettyFuture(res.shutdown())
+    ).flatMap { resources =>
+      ZIO.acquireRelease {
+        ZIO.attempt {
+          val client: core.RedisClient = core.RedisClient.create(resources, config.toRedisURI)
+          client.setOptions(config.toOptions)
+          val asyncClient = client.connect(ByteArrayCodec.INSTANCE).async
+          val reactive = client.connectPubSub(ByteArrayCodec.INSTANCE).reactive()
+          LettuceRedisClient(client, asyncClient, reactive)
+        }
+      }(client => client.close().ignore)
+    }
 }
 
 class LettuceRedisClient(

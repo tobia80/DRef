@@ -1,12 +1,22 @@
 package io.github.tobia80.dref.redis
 
 import io.github.tobia80.dref.*
-import io.lettuce.core.{ClientOptions, RedisURI, SslOptions}
+import io.lettuce.core.{ClientOptions, RedisURI, SocketOptions, SslOptions, TimeoutOptions}
+import io.lettuce.core.resource.{DefaultClientResources, Delay}
 import zio.*
 import zio.schema.{DeriveSchema, Schema}
 import zio.stream.{Take, ZStream}
 
 import java.util
+
+enum DisconnectedBehavior:
+  case Default, AcceptCommands, RejectCommands
+
+case class SocketConfig(
+  connectTimeout: Duration = 10.seconds,
+  keepAlive: Boolean = false,
+  tcpNoDelay: Boolean = true
+)
 
 case class RedisConfig(
   host: String,
@@ -15,10 +25,21 @@ case class RedisConfig(
   username: Option[String],
   password: Option[String],
   caCert: Option[String],
-  ttl: Option[Duration]
+  ttl: Option[Duration],
+  // ClientResources
+  ioThreadPoolSize: Option[Int] = None,
+  computationThreadPoolSize: Option[Int] = None,
+  reconnectMaxDelay: Duration = 30.seconds,
+  // ClientOptions
+  autoReconnect: Boolean = true,
+  disconnectedBehavior: DisconnectedBehavior = DisconnectedBehavior.Default,
+  requestQueueSize: Int = Int.MaxValue,
+  publishOnScheduler: Boolean = false,
+  socket: SocketConfig = SocketConfig(),
+  commandTimeout: Option[Duration] = None
 ) {
 
-  def toRedisURI: String = {
+  def toRedisURI: RedisURI = {
     val builder = RedisURI.Builder
       .redis(host, port)
       .withDatabase(database)
@@ -30,19 +51,58 @@ case class RedisConfig(
       case _                  => ()
     }
 
-    builder
-      .build()
-      .toURI
-      .toString
+    val uri = builder.build()
+    uri.setTimeout(java.time.Duration.ofMillis(socket.connectTimeout.toMillis))
+    uri
+  }
+
+  def toClientResources: DefaultClientResources = {
+    val builder = DefaultClientResources.builder()
+    ioThreadPoolSize.foreach(builder.ioThreadPoolSize(_))
+    computationThreadPoolSize.foreach(builder.computationThreadPoolSize(_))
+    builder.reconnectDelay(
+      Delay.exponential(
+        java.time.Duration.ZERO,
+        java.time.Duration.ofMillis(reconnectMaxDelay.toMillis),
+        2,
+        java.util.concurrent.TimeUnit.MILLISECONDS
+      )
+    )
+    builder.build()
   }
 
   def toOptions: ClientOptions = {
+    val socketOpts = SocketOptions.builder()
+      .connectTimeout(java.time.Duration.ofMillis(socket.connectTimeout.toMillis))
+      .keepAlive(socket.keepAlive)
+      .tcpNoDelay(socket.tcpNoDelay)
+      .build()
+
     val clientBuilder = ClientOptions.builder()
+      .autoReconnect(autoReconnect)
+      .disconnectedBehavior(disconnectedBehavior match
+        case DisconnectedBehavior.Default        => ClientOptions.DisconnectedBehavior.DEFAULT
+        case DisconnectedBehavior.AcceptCommands => ClientOptions.DisconnectedBehavior.ACCEPT_COMMANDS
+        case DisconnectedBehavior.RejectCommands => ClientOptions.DisconnectedBehavior.REJECT_COMMANDS
+      )
+      .requestQueueSize(requestQueueSize)
+      .publishOnScheduler(publishOnScheduler)
+      .socketOptions(socketOpts)
+
+    commandTimeout.foreach { t =>
+      clientBuilder.timeoutOptions(
+        TimeoutOptions.builder()
+          .fixedTimeout(java.time.Duration.ofMillis(t.toMillis))
+          .build()
+      )
+    }
+
     caCert.foreach { cert =>
       clientBuilder.sslOptions(
         SslOptions.builder().trustManager(SslOptions.Resource.from(java.io.File(cert))).build()
       )
     }
+
     clientBuilder.build()
   }
 }
