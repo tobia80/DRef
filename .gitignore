@@ -1,5 +1,30 @@
+# sbt
+target/
+project/target/
+project/project/
+
+# Bloop / BSP
+.bloop/
+.bsp/
+
+# Metals
+.metals/
+project/metals.sbt
+project/project/metals.sbt
+
+# IntelliJ IDEA
+.idea/
+
+# VSCode
+.vscode/
+
+# Java
 *.class
 *.log
-
-# virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
 hs_err_pid*
+
+# Redis
+dump.rdb
+
+# MCP (local config)
+.mcp.json
