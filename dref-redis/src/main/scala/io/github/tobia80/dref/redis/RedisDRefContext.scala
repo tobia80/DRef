@@ -51,9 +51,7 @@ case class RedisConfig(
       case _                  => ()
     }
 
-    val uri = builder.build()
-    uri.setTimeout(java.time.Duration.ofMillis(socket.connectTimeout.toMillis))
-    uri
+    builder.build()
   }
 
   def toClientResources: DefaultClientResources = {
