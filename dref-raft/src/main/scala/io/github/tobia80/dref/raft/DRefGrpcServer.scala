@@ -91,7 +91,7 @@ class DRefGrpcServer(
                     case err                   => new StatusException(io.grpc.Status.INTERNAL.withDescription(err.getMessage))
                   },
                   res =>
-                    if res == null then GetElementResponse(None)
+                    if res.getResult == null then GetElementResponse(None)
                     else GetElementResponse(Option(ByteString.copyFrom(res.getResult)))
                 )
   } yield res
