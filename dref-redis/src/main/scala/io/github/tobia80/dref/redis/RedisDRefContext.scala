@@ -186,12 +186,12 @@ object RedisDRefContext {
       override def setElementIfNotExist(name: String, value: Array[Byte], ttl: Option[Duration]): Task[Boolean] = {
         val change = ChangePayload(name = Chunk.fromArray(name.getBytes), value = Chunk.fromArray(value))
         for {
-          value  <-
+          notification <-
             DRefCodec
               .serializeToArray[ChangePayload](change)
               .mapError(err => new Exception(s"Cannot serialize notification ($change) (Error: ${err.getMessage})"))
-          result <- redisClient.setNx(Chunk.fromArray(name.getBytes), Chunk.fromArray(value), ttl)
-          _      <- publish(Chunk.fromArray(value)).when(result)
+          result       <- redisClient.setNx(Chunk.fromArray(name.getBytes), Chunk.fromArray(value), ttl)
+          _            <- publish(Chunk.fromArray(notification)).when(result)
         } yield result
       }
 
@@ -214,14 +214,12 @@ object RedisDRefContext {
       }
 
       override def detectStolenElement(name: String, value: Array[Byte]): ZStream[Any, Throwable, StolenElement] = {
-        val change = ChangePayload(name = Chunk.fromArray(name.getBytes), value = Chunk.fromArray(value))
         val stolen = for {
-          valueToCheck <-
-            DRefCodec
-              .serializeToArray[ChangePayload](change)
-              .mapError(err => new Exception(s"Cannot serialize notification ($change) (Error: ${err.getMessage})"))
-          result       <- redisClient.get(Chunk.fromArray(name.getBytes))
-        } yield result.forall(el => !util.Arrays.equals(el.toArray, valueToCheck))
+          result <- redisClient.get(Chunk.fromArray(name.getBytes))
+        } yield result match {
+          case Some(currentValue) => !util.Arrays.equals(currentValue.toArray, value)
+          case None               => true
+        }
         ZStream.repeatZIO(stolen.delay(1.second)).filter(identity).as(StolenElement(name))
       }
     }
