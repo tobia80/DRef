@@ -236,7 +236,7 @@ object RaftDRefContext {
                                        .forkScoped
 
     myNode <-
-      initialized.await *> createRaftNode(myEndpoint, myTransport, myTransport.endpointsList, sinks).tap { node =>
+      initialized.await *> createRaftNode(myEndpoint, myTransport, myTransport.endpointsList + myEndpoint, sinks).tap { node =>
         val nodeDescriptor = NodeDescriptor(myEndpoint.id, node, myTransport)
         myNodes.update(old => old + (myEndpoint.id -> nodeDescriptor)) *>
           ZIO.logDebug(s"Starting node $myEndpoint") *> ZIO.fromCompletableFuture(node.start()) *> ZIO.logDebug(
