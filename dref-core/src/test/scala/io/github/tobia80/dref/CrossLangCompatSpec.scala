@@ -9,7 +9,7 @@ import zio.test.*
 /** Wire-format tests shared with the Rust port. Both sides must agree on these
   * golden bytes for multi-language Redis/Raft clients to interoperate.
   */
-object CrossLangCompatSpec extends ZIOSpecDefault {
+object CrossLangCompatSpec extends QuietZIOSpec {
 
   case class Wrapper(value: String)
   given Schema[Wrapper] = DeriveSchema.gen[Wrapper]

@@ -1,5 +1,6 @@
 import Dependencies.{zio, zioK8s, sttp}
 
+import sbt.Level
 import scala.collection.Seq
 
 ThisBuild / version := "0.6.6"
@@ -66,6 +67,7 @@ def module(id: String, path: String, description: String): Project =
   Project(id, file(path))
     .settings(moduleName := id, name := description)
     .settings(testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework"))
+    .settings(Test / logLevel := Level.Warn)
 
 lazy val `core` = module("dref-core", "dref-core", "Core library")
   .settings(libraryDependencies ++= coreDeps)
@@ -73,13 +75,13 @@ lazy val `core` = module("dref-core", "dref-core", "Core library")
 lazy val example = module("example", "example", "Example app").dependsOn(`core`, raft).settings(noPublishSettings)
 
 lazy val redis = module("dref-redis", "dref-redis", "Redis backend")
-  .dependsOn(`core`)
+  .dependsOn(`core`, `core` % "test->test")
   .settings(
     libraryDependencies ++= redisDeps
   )
 
 lazy val raft = module("dref-raft", "dref-raft", "Raft backend")
-  .dependsOn(`core`)
+  .dependsOn(`core`, `core` % "test->test")
   .settings(
     libraryDependencies ++= raftDeps
   )

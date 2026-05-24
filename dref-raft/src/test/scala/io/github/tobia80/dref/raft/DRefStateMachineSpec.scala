@@ -2,11 +2,12 @@ package io.github.tobia80.dref.raft
 
 import com.google.protobuf.ByteString
 import io.github.tobia80.dref.*
+import io.github.tobia80.dref.QuietZIOSpec
 import reactor.core.publisher.Sinks
 import zio.*
 import zio.test.{assertTrue, Spec, TestEnvironment, ZIOSpecDefault}
 
-object DRefStateMachineSpec extends ZIOSpecDefault {
+object DRefStateMachineSpec extends QuietZIOSpec {
 
   private def makeStateMachine(): DRefStateMachine = {
     val sink = Sinks.many().multicast().onBackpressureBuffer[ChangeEvent]()

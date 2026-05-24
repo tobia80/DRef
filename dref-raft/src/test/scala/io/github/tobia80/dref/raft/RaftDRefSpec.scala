@@ -1,13 +1,13 @@
 package io.github.tobia80.dref.raft
 
-import io.github.tobia80.dref.{DRef, LockStolenException, ManualId}
+import io.github.tobia80.dref.{DRef, LockStolenException, ManualId, QuietZIOSpec}
 import io.github.tobia80.dref.DRef.*
 import io.github.tobia80.dref.DRef.auto.*
 import io.github.tobia80.dref.raft.RaftDRefContext.RaftDRefContext
 import zio.*
 import zio.test.{assertTrue, Spec, TestAspect, TestEnvironment, ZIOSpecDefault}
 
-object RaftDRefSpec extends ZIOSpecDefault {
+object RaftDRefSpec extends QuietZIOSpec {
 
   override def spec: Spec[TestEnvironment & Scope, Any] = suite("DRef Raft")(
     test("should be able to create a DRef") {
@@ -92,5 +92,5 @@ object RaftDRefSpec extends ZIOSpecDefault {
     ZLayer.succeed(RaftConfig(8082)),
     IpProvider.local,
     Scope.default
-  ) @@ TestAspect.withLiveClock @@ TestAspect.sequential @@ TestAspect.debug
+  ) @@ TestAspect.withLiveClock @@ TestAspect.sequential
 }
