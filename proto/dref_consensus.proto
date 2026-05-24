@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+import "raft.proto";
+import "state_command.proto";
+
+package io.github.tobia80;
+
+// Cross-language inter-node consensus transport. Both Scala and Rust nodes
+// implement this service so they can participate in the same cluster.
+//
+// AppendEntriesRequest.command carries a protobuf-encoded StateCommand.
+// InstallSnapshotRequest.snapshot carries a ClusterSnapshot message.
+
+message ClusterSnapshot {
+  repeated KVEntry entries = 1;
+}
+
+message AppendEntriesRequest {
+  string leader_id = 1;
+  uint64 term = 2;
+  // Protobuf-encoded StateCommand replicated by the leader.
+  bytes command = 3;
+  // Monotonic sequence number for ordering and deduplication.
+  uint64 seq = 4;
+}
+
+message AppendEntriesResponse {
+  bool success = 1;
+  uint64 term = 2;
+}
+
+message HeartbeatRequest {
+  string leader_id = 1;
+  uint64 term = 2;
+}
+
+message HeartbeatResponse {
+  bool acknowledged = 1;
+  uint64 term = 2;
+}
+
+message VoteRequest {
+  string candidate_id = 1;
+  uint64 term = 2;
+  uint64 last_seq = 3;
+}
+
+message VoteResponse {
+  bool granted = 1;
+  uint64 term = 2;
+}
+
+message InstallSnapshotRequest {
+  string leader_id = 1;
+  uint64 term = 2;
+  ClusterSnapshot snapshot = 3;
+  uint64 last_seq = 4;
+}
+
+message InstallSnapshotResponse {
+  bool success = 1;
+  uint64 term = 2;
+}
+
+service DRefConsensus {
+  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse) {}
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse) {}
+  rpc RequestVote(VoteRequest) returns (VoteResponse) {}
+  rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse) {}
+}

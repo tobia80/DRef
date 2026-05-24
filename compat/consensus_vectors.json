@@ -1,0 +1,19 @@
+{
+  "description": "Golden protobuf bytes for StateCommand shared by Scala (scalapb) and Rust (prost).",
+  "state_command_set_element": {
+    "name": "my-key",
+    "value_hex": "010203",
+    "expire_at": 1700000000,
+    "payload_hex": "0a130a066d792d6b657912030102031880e2cfaa06"
+  },
+  "state_command_delete_element": {
+    "name": "my-key",
+    "payload_hex": "PLACEHOLDER"
+  },
+  "cluster_snapshot_single_entry": {
+    "key": "shared-key",
+    "value_hex": "6869",
+    "expire_at": 1700000000,
+    "payload_hex": "PLACEHOLDER"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "description": "Golden wire-format bytes shared by Scala (zio-schema-msg-pack) and Rust (rmp-serde named maps). Used by CrossLangCompatSpec and compat_tests.rs.",
+  "lock_value": {
+    "value": 42,
+    "hex": "000000000000002a"
+  },
+  "change_payload_set": {
+    "name": "my-key",
+    "value_hex": "010203",
+    "delete": false,
+    "payload_hex": "83a46e616d65966d792d6b6579a576616c756593010203a664656c657465c2"
+  },
+  "change_payload_delete": {
+    "name": "my-key",
+    "delete": true,
+    "payload_hex": "83a46e616d65966d792d6b6579a576616c756590a664656c657465c3"
+  },
+  "msgpack_string_hello": {
+    "value": "hello",
+    "hex": "a568656c6c6f"
+  },
+  "msgpack_wrapper_hello": {
+    "value": { "value": "hello" },
+    "hex": "81a576616c7565a568656c6c6f"
+  },
+  "redis_crosslang_key": "dref:compat:crosslang-test"
+}

@@ -1,0 +1,39 @@
+syntax = "proto3";
+import "dref.proto";
+
+package io.github.tobia80;
+
+
+// https://github.com/MicroRaft/MicroRaft/blob/master/microraft/src/main/java/io/microraft/statemachine/StateMachine.java#L120
+message StartNewTermOpProto {
+}
+
+
+message KVEntry {
+  string key = 1;
+  bytes value = 2;
+  optional uint64 expireAt = 3;
+}
+
+message KVSnapshotChunkData {
+  repeated KVEntry entry = 1;
+}
+
+
+// https://github.com/MicroRaft/MicroRaft/blob/master/microraft/src/main/java/io/microraft/model/log/SnapshotChunk.java
+message KVSnapshotChunk {
+  int32 term = 1;
+  int64 index = 2;
+  KVSnapshotChunkData operation = 3;
+  int32 snapshotChunkIndex = 4;
+  int32 snapshotChunkCount = 5;
+}
+
+// https://github.com/MicroRaft/MicroRaft/blob/master/microraft/src/main/java/io/microraft/model/log/SnapshotEntry.java
+message SnapshotEntryProto {
+  int32 term = 1;
+  int64 index = 2;
+  repeated KVSnapshotChunk snapshotChunk = 3;
+}
+
+
