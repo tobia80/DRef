@@ -6,9 +6,10 @@ import com.coralogix.zio.k8s.model.core.v1.{EndpointAddress, EndpointSubset, End
 import com.coralogix.zio.k8s.model.pkg.apis.meta.v1.ObjectMeta
 import zio.*
 import zio.prelude.data.Optional
-import zio.test.{assertTrue, Spec, TestEnvironment, ZIOSpecDefault}
+import io.github.tobia80.dref.QuietZIOSpec
+import zio.test.{assertTrue, Spec, TestEnvironment}
 
-object KubernetesIpProviderSpec extends ZIOSpecDefault {
+object KubernetesIpProviderSpec extends QuietZIOSpec {
 
   private val serviceName = "my-service"
   private val namespace   = "default"

@@ -5,7 +5,7 @@ import DRef.auto.*
 import zio.test.{assertTrue, Spec, TestAspect, TestClock, TestEnvironment, ZIOSpecDefault}
 import zio.{durationInt, Promise, Ref, Scope, ZIO}
 
-object DRefSpec extends ZIOSpecDefault {
+object DRefSpec extends QuietZIOSpec {
 
   override def spec: Spec[TestEnvironment & Scope, Any] = suite("DRef memory")(
     test("should be able to create a DRef") {

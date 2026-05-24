@@ -1,12 +1,12 @@
 package io.github.tobia80.dref.redis
 
-import io.github.tobia80.dref.{DRef, DRefContext, LockStolenException, ManualId}
+import io.github.tobia80.dref.{DRef, DRefContext, LockStolenException, ManualId, QuietZIOSpec}
 import io.github.tobia80.dref.DRef.*
 import io.github.tobia80.dref.DRef.auto.*
 import zio.*
 import zio.test.{assertTrue, Spec, TestAspect, TestEnvironment, ZIOSpecDefault}
 
-object RedisDRefSpec extends ZIOSpecDefault {
+object RedisDRefSpec extends QuietZIOSpec {
 
   case class Wrapper(value: String)
 
@@ -97,5 +97,5 @@ object RedisDRefSpec extends ZIOSpecDefault {
         ttl = Some(5.seconds)
       )
     )
-  ) @@ TestAspect.debug
+  )
 }
