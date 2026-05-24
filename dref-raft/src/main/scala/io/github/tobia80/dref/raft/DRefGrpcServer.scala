@@ -23,7 +23,9 @@ class DRefGrpcServer(
 
   private def getLeaderNode: ZIO[Any, StatusException, RaftNode] = for {
     leader <- myNodes.get.flatMap { nodeMap =>
-                nodeMap.values.find(el => el.node.getTerm.getLeaderEndpoint.getId == el.id) match {
+                nodeMap.values.find { el =>
+                  Option(el.node.getTerm).flatMap(t => Option(t.getLeaderEndpoint)).exists(_.getId == el.id)
+                } match {
                   case Some(leader) => ZIO.succeed(leader.node)
                   case None         =>
                     ZIO.fail(
@@ -124,8 +126,12 @@ class DRefGrpcServer(
     context: RequestContext
   ): IO[StatusException, SendCommandResponse] = {
     val id = request.id
-    val message = SerializationUtils.deserialize[RaftMessage](request.payload.toByteArray)
     for {
+      message <- ZIO
+                   .attempt(SerializationUtils.deserialize[RaftMessage](request.payload.toByteArray))
+                   .mapError(err =>
+                     new StatusException(io.grpc.Status.INVALID_ARGUMENT.withDescription(s"Invalid payload: ${err.getMessage}"))
+                   )
       nodeOpt <- myNodes.get.map(_.get(id))
       node    <- ZIO
                    .fromOption(nodeOpt)

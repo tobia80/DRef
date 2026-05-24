@@ -8,14 +8,15 @@ import reactor.core.publisher.Sinks
 
 import java.util
 import java.util.function.Consumer
+import scala.jdk.CollectionConverters._
 
 class DRefStateMachine(streamBuilder: Sinks.Many[ChangeEvent]) extends StateMachine {
 
-  import scala.collection.mutable
-
   private case class ExpiringValue(value: Array[Byte], expireAt: Option[Long])
 
-  private val innerMap = mutable.Map[String, ExpiringValue]()
+  private val innerMap = new java.util.concurrent.ConcurrentHashMap[String, ExpiringValue]()
+
+  private def getOpt(key: String): Option[ExpiringValue] = Option(innerMap.get(key))
 
   override def runOperation(commitIndex: Long, operation: Any): AnyRef =
     operation match {
@@ -35,62 +36,58 @@ class DRefStateMachine(streamBuilder: Sinks.Many[ChangeEvent]) extends StateMach
         throw new IllegalArgumentException(s"Unsupported operation: $operation")
     }
 
-  private def retrieveExpirationTable(commitIndex: Long, request: GetExpirationTableRequest) =
-    innerMap.collect { case (name, ExpiringValue(_, Some(expireAt))) =>
+  private def retrieveExpirationTable(commitIndex: Long, request: GetExpirationTableRequest): Map[String, Long] =
+    innerMap.asScala.collect { case (name, ExpiringValue(_, Some(expireAt))) =>
       (name, expireAt)
     }.toMap
 
   private def setElement(commitIndex: Long, operation: SetElementRequest): AnyRef = {
-    val res = innerMap.put(operation.name, ExpiringValue(operation.value.toByteArray, operation.expireAt))
-    streamBuilder.tryEmitNext(SetElement(operation.name, operation.value.toByteArray)).orThrow()
-    res
+    innerMap.put(operation.name, ExpiringValue(operation.value.toByteArray, operation.expireAt))
+    val _ = streamBuilder.tryEmitNext(SetElement(operation.name, operation.value.toByteArray))
+    null
   }
 
-  private def setElementIfNotExist(commitIndex: Long, operation: SetElementIfNotExistRequest): AnyRef = {
-    val res = innerMap.get(operation.name)
-    res match {
-      case Some(value) => java.lang.Boolean.FALSE
-      case None        =>
-        innerMap.put(operation.name, ExpiringValue(operation.value.toByteArray, operation.expireAt))
-        streamBuilder.tryEmitNext(SetElement(operation.name, operation.value.toByteArray)).orThrow()
+  private def setElementIfNotExist(commitIndex: Long, operation: SetElementIfNotExistRequest): AnyRef =
+    Option(
+      innerMap.putIfAbsent(
+        operation.name,
+        ExpiringValue(operation.value.toByteArray, operation.expireAt)
+      )
+    ) match {
+      case None =>
+        val _ = streamBuilder.tryEmitNext(SetElement(operation.name, operation.value.toByteArray))
         java.lang.Boolean.TRUE
+      case Some(_) => java.lang.Boolean.FALSE
     }
-  }
 
   private def getElement(commitIndex: Long, operation: GetElementRequest): Option[Array[Byte]] =
-    innerMap.get(operation.name).map(_.value)
+    getOpt(operation.name).map(_.value)
 
   private def deleteElement(commitIndex: Long, operation: DeleteElementRequest): Option[Array[Byte]] = {
     val res = innerMap.remove(operation.name)
-    streamBuilder.tryEmitNext(DeleteElement(operation.name))
-    res.map(_.value)
+    val _ = streamBuilder.tryEmitNext(DeleteElement(operation.name))
+    Option(res).map(_.value)
   }
 
   private def deleteIfExpired(commitIndex: Long, operation: DeleteIfExpiredRequest): Option[Array[Byte]] =
-    innerMap.get(operation.name) match {
-      case Some(ExpiringValue(value, Some(expireAt))) if expireAt <= operation.expiredBefore =>
-        innerMap.remove(operation.name)
-        streamBuilder.tryEmitNext(DeleteElement(operation.name))
-        Some(value)
-      case _ => None
+    getOpt(operation.name).filter(_.expireAt.exists(_ <= operation.expiredBefore)).map { res =>
+      innerMap.remove(operation.name)
+      val _ = streamBuilder.tryEmitNext(DeleteElement(operation.name))
+      res.value
     }
 
-  private def expireElement(commitIndex: Long, operation: ExpireElementRequest): AnyRef = {
-    val res = innerMap.get(operation.name)
-    res match {
-      case Some(value) =>
-        innerMap.put(operation.name, value.copy(expireAt = Some(operation.expireAt)))
+  private def expireElement(commitIndex: Long, operation: ExpireElementRequest): AnyRef =
+    getOpt(operation.name) match {
+      case Some(old) =>
+        innerMap.put(operation.name, old.copy(expireAt = Some(operation.expireAt)))
         java.lang.Boolean.TRUE
-      case None        => java.lang.Boolean.FALSE
+      case None => java.lang.Boolean.FALSE
     }
-  }
-
-  import scala.jdk.CollectionConverters.*
 
   override def takeSnapshot(commitIndex: Long, snapshotChunkConsumer: Consumer[AnyRef]): Unit = {
     val values = for {
-      e      <- innerMap.toSet
-      kvEntry = KVEntry(e._1, ByteString.copyFrom(e._2.value), e._2.expireAt)
+      (key, ev) <- innerMap.asScala.toSet
+      kvEntry    = KVEntry(key, ByteString.copyFrom(ev.value), ev.expireAt)
     } yield kvEntry
     values.grouped(5).foreach { entry =>
       val chunk = KVSnapshotChunkData(entry.toSeq)
@@ -107,5 +104,5 @@ class DRefStateMachine(streamBuilder: Sinks.Many[ChangeEvent]) extends StateMach
     values.foreach(entry => innerMap.put(entry.key, ExpiringValue(entry.value.toByteArray, entry.expireAt)))
   }
 
-  override def getNewTermOperation: AnyRef = StartNewTermOpProto.defaultInstance
+  override def getNewTermOperation: AnyRef = StartNewTermOpProto()
 }
