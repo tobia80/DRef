@@ -290,6 +290,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dref-examples"
+version = "0.1.0"
+dependencies = [
+ "dref-core",
+ "serde",
+ "tokio",
+]
+
+[[package]]
 name = "dref-raft"
 version = "0.1.0"
 dependencies = [

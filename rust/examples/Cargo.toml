@@ -1,0 +1,29 @@
+[package]
+name = "dref-examples"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Runnable examples for the DRef Rust workspace"
+publish = false
+
+[[bin]]
+name = "dref-examples"
+path = "src/main.rs"
+
+[[example]]
+name = "quickstart"
+path = "examples/quickstart.rs"
+
+[[example]]
+name = "leader_election"
+path = "examples/leader_election.rs"
+
+[[example]]
+name = "distributed_lock"
+path = "examples/distributed_lock.rs"
+
+[dependencies]
+dref-core = { path = "../dref-core" }
+tokio = { workspace = true }
+serde = { workspace = true }

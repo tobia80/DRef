@@ -4,6 +4,7 @@ members = [
     "dref-core",
     "dref-redis",
     "dref-raft",
+    "examples",
 ]
 
 [workspace.package]
