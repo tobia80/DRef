@@ -81,7 +81,8 @@ impl ChangePayload {
         String::from_utf8(self.name.clone()).ok()
     }
     fn encode(&self) -> Result<Vec<u8>, DRefError> {
-        rmp_serde::to_vec(self).map_err(|e| DRefError::Serialize(e.to_string()))
+        // Named-field encoding to match Scala's zio-schema-msg-pack struct maps.
+        rmp_serde::to_vec_named(self).map_err(|e| DRefError::Serialize(e.to_string()))
     }
     fn decode(bytes: &[u8]) -> Result<Self, DRefError> {
         rmp_serde::from_slice(bytes).map_err(|e| DRefError::Deserialize(e.to_string()))
