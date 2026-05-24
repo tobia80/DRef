@@ -1,14 +1,26 @@
 # DRef (Rust)
 
+[![CI](https://github.com/tobia80/DRef/actions/workflows/scala.yml/badge.svg)](https://github.com/tobia80/DRef/actions/workflows/scala.yml)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](../LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-stable-orange?logo=rust)](https://www.rust-lang.org/)
+[![Scala counterpart](https://img.shields.io/maven-central/v/io.github.tobia80/dref-core_3.svg?logo=sonatype)](../README.md)
+[![Cross-language](https://img.shields.io/badge/binary%20compatible-Scala%20%2B%20Rust-blue)](#cross-language-compatibility)
+
 Distributed Ref (DRef) is a library for synchronising state and coordination
 primitives across distributed nodes. It lets you treat distributed state the
 same way you would work with an ordinary in-memory ref, while also giving you
 cluster-wide locks and change streams when you need stronger coordination.
 
-This workspace is the Rust port of the Scala
+This workspace is the **Rust/Tokio** port of the Scala
 [`dref-core`](../README.md) project. It exposes the same conceptual API
 (`DRef::make`, `update`, `get`, `modify`, `lock_with_context`, change streams)
 backed by either an in-memory store, Redis, or a Raft cluster.
+
+**Binary compatibility:** Scala and Rust nodes can participate in the same
+cluster when they use the default MsgPack codec and the shared protobuf
+definitions under [`proto/`](../proto/). See
+[Cross-language compatibility](#cross-language-compatibility) for the exact
+contracts and verification commands.
 
 ## Crates
 
@@ -86,6 +98,48 @@ cargo test -p dref-raft
 cargo test -p dref-redis --features test-redis
 ```
 
+### Cross-language wire-format tests
+
+These tests verify that Rust and Scala produce identical bytes for shared
+payloads. Run them from the repository root (see also the
+[root README](../README.md#cross-language-compatibility)):
+
+```bash
+# Core MsgPack + lock wire format
+cargo test -p dref-core --test compat_tests
+sbt "dref-core/testOnly io.github.tobia80.dref.CrossLangCompatSpec"
+
+# Raft protobuf golden bytes + cluster behaviour
+../scripts/crosslang-raft-compat.sh
+
+# Redis: Scala writes fixtures, Rust reads them (requires Redis on localhost:6379)
+../scripts/crosslang-redis-compat.sh
+```
+
+## Cross-language compatibility
+
+Mixed **Scala + Rust** deployments are a first-class use case. Both
+implementations agree on the following on-the-wire contracts:
+
+| Layer | Shared contract | Rust verification |
+| --- | --- | --- |
+| **Core values & locks** | MsgPack via `rmp-serde` (named maps), 8-byte big-endian lock tokens | `dref-core/tests/compat_tests.rs` against [`compat/vectors.json`](../compat/vectors.json) |
+| **Raft log entries** | [`proto/state_command.proto`](../proto/state_command.proto) (compiled via `prost`) | `dref-raft/tests/consensus_compat_tests.rs` against [`compat/consensus_vectors.json`](../compat/consensus_vectors.json) |
+| **Inter-node RPC** | [`proto/dref.proto`](../proto/dref.proto), [`proto/dref_consensus.proto`](../proto/dref_consensus.proto) | `dref-raft/tests/raft_tests.rs` |
+| **Redis backend** | Same key layout, TTL semantics, and MsgPack change payloads | `dref-redis/tests/crosslang_redis_tests.rs` (reads fixtures written by Scala) |
+
+Practical implications:
+
+- A **Rust service** can read/write the same Redis keys as a **Scala service**
+  when both use the default `MsgPackCodec`.
+- **Raft cluster members** can mix Scala and Rust nodes; log entries and gRPC
+  messages use the shared protobuf schemas in [`proto/`](../proto/).
+- **Lock tokens** are always 8-byte big-endian integers, so stolen-lock
+  detection works consistently across languages.
+
+Golden byte vectors under [`compat/`](../compat/) let either side verify payloads
+without a running cluster.
+
 ## Switching backends
 
 Every example above uses `LocalDRefContext` for brevity. To switch backends,
@@ -141,8 +195,9 @@ Configuration notes:
    `detect_stolen_element`) that the locking primitive uses to detect lock
    loss without polling.
 2. A `DRefCodec<T>` — converts `T` to/from bytes. The default is `MsgPackCodec`
-   (via `rmp-serde`); you can plug your own if you need a different wire
-   format.
+   (via `rmp-serde`), chosen for **binary compatibility with the Scala
+   implementation's MsgPack codec**. You can plug your own if you need a
+   different wire format.
 3. A name — derived automatically from the caller's `file:line` so each call
    site gets a stable, unique key. Use `DRef::make_with_name` to override.
 
