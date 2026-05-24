@@ -168,14 +168,61 @@ identical, up-to-date metrics without central bottlenecks.
   - `dref-raft`: consensus-backed storage for production clusters.
   - `dref-redis`: integrate with existing Redis deployments.
   - `dref-inmemory`: ideal for tests or local development.
+- **Rust port (`rust/`).** A Tokio-based implementation of the same API with
+  `dref-core`, `dref-redis`, and `dref-raft` crates. Scala and Rust nodes can
+  share Redis keys and participate in the same Raft cluster when using the
+  shared protobuf wire formats.
 - **Examples.** The `example` module contains ready-to-run demos that show how
   to wire everything together with ZIO layers.
+
+## Cross-language compatibility
+
+DRef is implemented in both **Scala (ZIO)** and **Rust (Tokio)**. Mixed
+clusters are supported when both sides agree on wire formats:
+
+| Layer | Shared contract | Verification |
+| --- | --- | --- |
+| **Core values & locks** | MsgPack codec, 8-byte big-endian lock tokens | `compat/vectors.json`, `CrossLangCompatSpec` (Scala), `compat_tests` (Rust) |
+| **Raft log entries** | `state_command.proto` | `compat/consensus_vectors.json`, `CrossLangConsensusCompatSpec` (Scala), `consensus_compat_tests` (Rust) |
+| **Inter-node RPC** | `dref.proto`, `dref_consensus.proto` | `ProtoRaftDRefSpec` (Scala), `raft_tests` (Rust) |
+| **Redis backend** | Same key layout, TTL semantics, keyspace notifications | `CrossLangRedisSpec` (Scala), `crosslang_redis_tests` (Rust) |
+
+Run the cross-language checks from the repository root:
+
+```bash
+# Core MsgPack + lock wire format
+sbt "dref-core/testOnly io.github.tobia80.dref.CrossLangCompatSpec"
+(cd rust && cargo test -p dref-core --test compat_tests)
+
+# Raft protobuf golden bytes + cluster behaviour
+./scripts/crosslang-raft-compat.sh
+
+# Redis: Scala writes fixtures, Rust reads them (requires Redis on localhost:6379)
+./scripts/crosslang-redis-compat.sh
+```
+
+Golden byte vectors live under [`compat/`](compat/) so either language can
+regenerate or verify payloads without a running cluster.
 
 ## Testing
 Run the full test suite with:
 
 ```bash
 sbt test
+```
+
+> **Note:** The `dref-redis` tests require a running Redis instance
+> (`localhost:6379`). Redis tests will fail with connection errors if Redis
+> is not available. The `dref-raft` and `dref-core` tests run independently and
+> do not require external services.
+
+For the Rust workspace:
+
+```bash
+cd rust
+cargo test -p dref-core
+cargo test -p dref-raft
+cargo test -p dref-redis --features test-redis
 ```
 
 ## Run the example cluster with Docker
@@ -219,12 +266,21 @@ discoverable through a single service name.
 The example honours the following environment variables, which the compose file
 sets automatically:
 
+- `DREF_K8S_SERVICE` + `DREF_K8S_NAMESPACE` — discover Raft peers from a
+  Kubernetes `Endpoints` resource (used in k8s deployments; also supported by
+  the Rust `dref-raft` crate via [`IpProvider`](rust/dref-raft/src/ip_provider.rs)).
 - `DREF_NODE_SERVICES` — comma separated list of DNS names to discover other
   Raft nodes. By default every node resolves `dref-example` to the full replica
   set.
 - `DREF_NODE_ADDRESSES` — optional override that accepts a comma separated list
   of IP addresses instead of DNS names.
 - `DREF_PORT` — the port used by the gRPC server (defaults to `8082`).
+
+When `initial_endpoints` is not set explicitly, both the Scala example and the
+Rust `RaftDRefContext::start` helper resolve peers from these variables in the
+same priority order (Kubernetes → static addresses → DNS). The Rust port
+periodically re-polls the provider so new pods picked up by a Service are
+added to the gRPC client pool.
 
 ## License
 
