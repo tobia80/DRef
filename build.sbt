@@ -4,7 +4,7 @@ import scala.collection.Seq
 
 ThisBuild / version := "0.6.6"
 
-ThisBuild / scalaVersion := "3.7.3"
+ThisBuild / scalaVersion := "3.8.3"
 
 ThisBuild / organization         := "io.github.tobia80"
 ThisBuild / organizationName     := "tobia80"
@@ -33,21 +33,21 @@ val coreDeps = Seq(
   "dev.zio"         %% "zio-interop-reactivestreams" % "2.0.2",
   "io.github.vigoo" %% "desert-zio"                  % "0.3.6",
   "io.github.vigoo" %% "desert-zio-schema"           % "0.3.6",
-  "dev.zio"         %% "zio-schema-msg-pack"         % "1.7.5"
+  "dev.zio"         %% "zio-schema-msg-pack"         % "1.8.5"
 ) ++ testDeps
 
 val redisDeps = Seq(
-  "io.lettuce" % "lettuce-core" % "6.8.1.RELEASE"
+  "io.lettuce" % "lettuce-core" % "7.5.2.RELEASE"
 ) ++ testDeps
 
 val raftDeps = Seq(
   "io.microraft"                   % "microraft"     % "0.7",
   "com.thesamet.scalapb.zio-grpc" %% "zio-grpc-core" % "0.6.3",
-  "org.apache.commons"             % "commons-lang3" % "3.19.0",
-  "io.projectreactor"              % "reactor-core"  % "3.7.12",
+  "org.apache.commons"             % "commons-lang3" % "3.20.0",
+  "io.projectreactor"              % "reactor-core"  % "3.8.5",
 
   // grpc
-  "io.grpc"               % "grpc-netty"           % "1.76.0",
+  "io.grpc"               % "grpc-netty"           % "1.81.0",
   "com.thesamet.scalapb" %% "scalapb-runtime-grpc" % scalapb.compiler.Version.scalapbVersion,
 
   // kubernetes service discovery

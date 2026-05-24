@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rand::Rng;
+use rand::RngExt;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Instant};
 use tracing::{debug, info, warn};
@@ -414,8 +414,8 @@ impl Consensus {
                     // it, multiple followers can wake up simultaneously and
                     // split the vote forever.
                     let jitter = {
-                        let mut rng = rand::thread_rng();
-                        rng.gen_range(0..self.config.election_timeout.as_millis() as u64 / 2)
+                        let mut rng = rand::rng();
+                        rng.random_range(0..self.config.election_timeout.as_millis() as u64 / 2)
                     };
                     let timeout = self.config.election_timeout + Duration::from_millis(jitter);
                     let last = { self.state.read().await.last_heartbeat };

@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::stream::{Stream, StreamExt};
-use rand::Rng;
+use rand::RngExt;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::{BroadcastStream, IntervalStream};
@@ -106,8 +106,8 @@ impl RaftDRefContext {
         // Derive a node id if the caller didn't provide one. Match Scala's
         // "nextLongBetween(0, 99999)" — short, easy to recognize in logs.
         let node_id = config.node_id.clone().unwrap_or_else(|| {
-            let mut rng = rand::thread_rng();
-            rng.gen_range(0u64..99_999).to_string()
+            let mut rng = rand::rng();
+            rng.random_range(0u64..99_999).to_string()
         });
 
         let mut config = config;
@@ -286,9 +286,9 @@ impl RaftDRefContext {
         // Otherwise probe peers in random order: any of them might know.
         let mut ids = self.inner.member_ids.read().await.clone();
         {
-            let mut rng = rand::thread_rng();
+            let mut rng = rand::rng();
             for i in (1..ids.len()).rev() {
-                let j = rng.gen_range(0..=i);
+                let j = rng.random_range(0..=i);
                 ids.swap(i, j);
             }
         }
