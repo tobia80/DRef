@@ -56,6 +56,16 @@ object RaftDRefContext {
       ZManagedChannel(NettyChannelBuilder.forAddress(address, port).usePlaintext())
     )
 
+  private def waitForLocalGrpcServer(port: Int): Task[Unit] =
+    ZIO
+      .attemptBlocking {
+        val socket = new java.net.Socket()
+        try socket.connect(new java.net.InetSocketAddress("127.0.0.1", port), 500)
+        finally socket.close()
+      }
+      .retry(Schedule.spaced(50.millis) && Schedule.recurs(200))
+      .unit
+
   private def findMyLeaderNode(myNodes: Ref[Map[String, NodeDescriptor]]): Task[Option[RaftNode]] =
     myNodes.get.map { nodeMap =>
       nodeMap.values.find { el =>
@@ -177,6 +187,7 @@ object RaftDRefContext {
     services              = ServiceList.add(drefServer)
     logic                 = ServerLayer.fromServiceList(builder, services)
     ret                  <- logic.launch.forkScoped
+    _                    <- waitForLocalGrpcServer(config.port)
 
     initialized                   <- Promise.make[Throwable, Unit]
     _                             <- ipProvider
