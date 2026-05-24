@@ -12,6 +12,7 @@ import zio.{Runtime, Unsafe}
 
 class GrpcTransport(source: RaftEndpoint, runtime: Runtime[Any]) extends Transport {
 
+  @volatile
   private var endpointsClient: Map[DRefRaftClient, List[RaftEndpoint]] = Map.empty
 
   override def send(target: RaftEndpoint, message: RaftMessage): Unit = {
@@ -33,11 +34,12 @@ class GrpcTransport(source: RaftEndpoint, runtime: Runtime[Any]) extends Transpo
   }
 
   private def findClient(target: RaftEndpoint): Option[DRefRaftClient] =
-    endpointsClient.find { case (_, endpoints) => endpoints.contains(target) }.map(_._1)
+    endpointsClient.find { case (_, endpoints) => endpoints.exists(_.getId == target.getId) }.map(_._1)
 
-  override def isReachable(endpoint: RaftEndpoint): Boolean = endpointsList.contains(endpoint)
+  override def isReachable(endpoint: RaftEndpoint): Boolean =
+    endpointsClient.values.exists(_.exists(_.getId == endpoint.getId))
 
-  def endpointsList: Set[RaftEndpoint] = endpointsClient.values.flatMap(_.toList).toSet
+  def endpointsList: Set[RaftEndpoint] = endpointsClient.values.flatten.toSet
 
   def updateEndpoints(updatedEndpoints: Map[DRefRaftClient, List[RaftEndpoint]]): Unit =
     endpointsClient = updatedEndpoints

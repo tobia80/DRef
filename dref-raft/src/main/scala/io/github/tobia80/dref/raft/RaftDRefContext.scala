@@ -58,7 +58,9 @@ object RaftDRefContext {
 
   private def findMyLeaderNode(myNodes: Ref[Map[String, NodeDescriptor]]): Task[Option[RaftNode]] =
     myNodes.get.map { nodeMap =>
-      nodeMap.values.find(el => el.node.getTerm.getLeaderEndpoint.getId == el.id).map(_.node)
+      nodeMap.values.find { el =>
+        Option(el.node.getTerm).flatMap(t => Option(t.getLeaderEndpoint)).exists(_.getId == el.id)
+      }.map(_.node)
     }
 
   private def leader(raftNode: RaftNode): URIO[Any, Option[RaftEndpoint]] =
