@@ -84,6 +84,9 @@ lazy val raft = module("dref-raft", "dref-raft", "Raft backend")
     libraryDependencies ++= raftDeps
   )
   .settings(commonProtobufSettings)
+  .settings(
+    Compile / PB.protoSources := Seq(baseDirectory.value.getParentFile / "proto")
+  )
 
 aggregateProjects(`core`, redis, raft, example)
 

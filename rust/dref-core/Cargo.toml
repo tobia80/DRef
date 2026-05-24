@@ -20,4 +20,5 @@ tracing = { workspace = true }
 rand = { workspace = true }
 
 [dev-dependencies]
+rmp-serde.workspace = true
 tokio = { workspace = true }

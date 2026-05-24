@@ -35,12 +35,12 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Instant};
 use tracing::{debug, info, warn};
 
-use crate::command::DRefCommand;
 use crate::config::{NodeEndpoint, RaftConfig};
-use crate::proto::raft_network::raft_internal_client::RaftInternalClient;
-use crate::proto::raft_network::{
-    AppendEntriesRequest, HeartbeatRequest, InstallSnapshotRequest, VoteRequest,
+use crate::proto::dref_consensus::d_ref_consensus_client::DRefConsensusClient;
+use crate::proto::dref_consensus::{
+    AppendEntriesRequest, ClusterSnapshot, HeartbeatRequest, InstallSnapshotRequest, VoteRequest,
 };
+use crate::state_command::{self, StateCommand};
 use crate::state_machine::{ApplyResult, StateMachine};
 use tonic::transport::Channel;
 
@@ -71,7 +71,7 @@ pub enum ConsensusError {
 /// avoid a startup race where peers aren't listening yet.
 struct PeerConn {
     endpoint: NodeEndpoint,
-    client: Mutex<Option<RaftInternalClient<Channel>>>,
+    client: Mutex<Option<DRefConsensusClient<Channel>>>,
 }
 
 impl PeerConn {
@@ -85,7 +85,7 @@ impl PeerConn {
     async fn client(
         &self,
         timeout: Duration,
-    ) -> Result<RaftInternalClient<Channel>, String> {
+    ) -> Result<DRefConsensusClient<Channel>, String> {
         let mut slot = self.client.lock().await;
         if let Some(c) = slot.as_ref() {
             return Ok(c.clone());
@@ -99,7 +99,7 @@ impl PeerConn {
         .timeout(timeout);
         // Lazy connect avoids blocking startup on peers that aren't up yet.
         let chan = endpoint.connect_lazy();
-        let client = RaftInternalClient::new(chan);
+        let client = DRefConsensusClient::new(chan);
         *slot = Some(client.clone());
         Ok(client)
     }
@@ -208,7 +208,7 @@ impl Consensus {
     /// follower is "best effort" replication. This is the main divergence
     /// from real Raft and the reason we call out the simplification at the
     /// top of this file.
-    pub async fn submit(&self, cmd: DRefCommand) -> Result<ApplyResult, ConsensusError> {
+    pub async fn submit(&self, cmd: StateCommand) -> Result<ApplyResult, ConsensusError> {
         let (term, seq) = {
             let mut st = self.state.write().await;
             if st.role != Role::Leader {
@@ -220,8 +220,7 @@ impl Consensus {
             (st.term, st.last_seq)
         };
 
-        let bytes = cmd
-            .to_bytes()
+        let bytes = state_command::encode(&cmd)
             .map_err(|e| ConsensusError::Serialize(e.to_string()))?;
         let result = self.state_machine.apply(cmd).await;
 
@@ -299,7 +298,7 @@ impl Consensus {
         let current_term = st.term;
         drop(st);
 
-        match DRefCommand::from_bytes(&command) {
+        match state_command::decode(&command) {
             Ok(cmd) => {
                 self.state_machine.apply(cmd).await;
                 (true, current_term)
@@ -366,7 +365,7 @@ impl Consensus {
         &self,
         leader_id: String,
         term: u64,
-        snapshot: Vec<u8>,
+        snapshot: ClusterSnapshot,
         last_seq: u64,
     ) -> (bool, u64) {
         let mut st = self.state.write().await;
@@ -384,13 +383,8 @@ impl Consensus {
         let current_term = st.term;
         drop(st);
 
-        match self.state_machine.install_snapshot(&snapshot).await {
-            Ok(()) => (true, current_term),
-            Err(e) => {
-                warn!(error = ?e, "failed to install snapshot");
-                (false, current_term)
-            }
-        }
+        self.state_machine.install_snapshot(snapshot).await;
+        (true, current_term)
     }
 
     // --- Background loops ---------------------------------------------------
@@ -557,13 +551,7 @@ impl Consensus {
             let st = self.state.read().await;
             (st.term, st.last_seq)
         };
-        let snapshot = match self.state_machine.take_snapshot().await {
-            Ok(b) => b,
-            Err(e) => {
-                warn!(error = ?e, "failed to take snapshot");
-                return;
-            }
-        };
+        let snapshot = self.state_machine.take_snapshot().await;
         for (id, peer) in self.peers.iter() {
             let id = id.clone();
             let peer = Arc::clone(peer);
@@ -576,7 +564,7 @@ impl Consensus {
                         let req = InstallSnapshotRequest {
                             leader_id,
                             term,
-                            snapshot,
+                            snapshot: Some(snapshot),
                             last_seq,
                         };
                         if let Err(e) = client.install_snapshot(req).await {

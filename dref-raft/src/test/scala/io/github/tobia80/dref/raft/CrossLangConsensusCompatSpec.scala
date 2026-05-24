@@ -29,20 +29,14 @@ object CrossLangConsensusCompatSpec extends ZIOSpecDefault {
       val payloadHex = hex(cmd.toByteArray)
       for {
         expected <- readPayloadHex("state_command_set_element")
-      } yield assertTrue(
-        payloadHex == expected || expected == "PLACEHOLDER",
-        payloadHex.nonEmpty
-      )
+      } yield assertTrue(payloadHex == expected, payloadHex.nonEmpty)
     },
     test("StateCommand delete_element matches golden bytes") {
       val cmd = StateCommands.deleteElement("my-key")
       val payloadHex = hex(cmd.toByteArray)
       for {
         expected <- readPayloadHex("state_command_delete_element")
-      } yield assertTrue(
-        payloadHex == expected || expected == "PLACEHOLDER",
-        payloadHex.nonEmpty
-      )
+      } yield assertTrue(payloadHex == expected, payloadHex.nonEmpty)
     },
     test("ClusterSnapshot single entry matches golden bytes") {
       val snapshot = ClusterSnapshot(
@@ -51,10 +45,7 @@ object CrossLangConsensusCompatSpec extends ZIOSpecDefault {
       val payloadHex = hex(snapshot.toByteArray)
       for {
         expected <- readPayloadHex("cluster_snapshot_single_entry")
-      } yield assertTrue(
-        payloadHex == expected || expected == "PLACEHOLDER",
-        payloadHex.nonEmpty
-      )
+      } yield assertTrue(payloadHex == expected, payloadHex.nonEmpty)
     },
     test("print set_element hex for compat/consensus_vectors.json") {
       val cmd = StateCommands.setElement("my-key", Array[Byte](1, 2, 3), Some(1700000000L))

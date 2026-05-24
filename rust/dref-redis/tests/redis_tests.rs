@@ -157,3 +157,34 @@ async fn distributed_locks_should_work() -> Result<(), DRefError> {
     ctx.delete_element(lock_key).await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn stolen_lock_should_fail_when_value_overwritten() -> Result<(), DRefError> {
+    let ctx = fresh_context().await;
+    let lock_key = "dref-redis-test:stolen-lock";
+    ctx.delete_element(lock_key).await?;
+
+    let ctx_for_lock = ctx.clone();
+    let lock_id = IdProvider::ManualId(lock_key.to_string());
+
+    let lock_task = tokio::spawn(async move {
+        dref_core::lock_with_context(&ctx_for_lock, lock_id, move || async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            Ok::<&str, DRefError>("original-lock-completed")
+        })
+        .await
+    });
+
+    sleep(Duration::from_millis(500)).await;
+    ctx.set_element(lock_key, b"stolen-value".to_vec(), None)
+        .await?;
+
+    let result = lock_task.await.expect("lock task");
+    assert!(
+        matches!(result, Err(DRefError::LockStolen(_))),
+        "expected LockStolen, got {result:?}"
+    );
+
+    ctx.delete_element(lock_key).await?;
+    Ok(())
+}

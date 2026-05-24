@@ -8,12 +8,12 @@
   },
   "state_command_delete_element": {
     "name": "my-key",
-    "payload_hex": "PLACEHOLDER"
+    "payload_hex": "1a080a066d792d6b6579"
   },
   "cluster_snapshot_single_entry": {
     "key": "shared-key",
     "value_hex": "6869",
     "expire_at": 1700000000,
-    "payload_hex": "PLACEHOLDER"
+    "payload_hex": "0a160a0a7368617265642d6b6579120268691880e2cfaa06"
   }
 }

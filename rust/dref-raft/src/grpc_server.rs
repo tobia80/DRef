@@ -1,24 +1,14 @@
 //! gRPC server implementations for both:
 //!
 //! 1. The public **DRefRaft** service (from `dref.proto`) — bit-compatible
-//!    with the Scala definition. Clients (other nodes, or end-users via
-//!    [`crate::context::RaftDRefContext`]) send writes here; non-leader
-//!    nodes return a `FAILED_PRECONDITION` with a `not-leader` description
-//!    that the client uses to re-target the leader.
-//!
-//! 2. The internal **RaftInternal** service (from `raft_network.proto`) —
-//!    used between nodes for AppendEntries, Heartbeat, RequestVote, and
-//!    InstallSnapshot.
-//!
-//! Both services run on the same gRPC server (one port per node), matching
-//! the Scala implementation which also hosts everything on a single
-//! `ServerBuilder`.
+//!    with the Scala definition.
+//! 2. The internal **DRefConsensus** service (from `dref_consensus.proto`) —
+//!    used between nodes for cross-language replication.
 
 use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 
-use crate::command::DRefCommand;
 use crate::consensus::{Consensus, ConsensusError};
 use crate::proto::dref::d_ref_raft_server::DRefRaft;
 use crate::proto::dref::{
@@ -27,22 +17,17 @@ use crate::proto::dref::{
     SendCommandRequest, SendCommandResponse, SetElementIfNotExistRequest,
     SetElementIfNotExistResponse, SetElementRequest, SetElementResponse,
 };
-use crate::proto::raft_network::raft_internal_server::RaftInternal;
-use crate::proto::raft_network::{
+use crate::proto::dref_consensus::d_ref_consensus_server::DRefConsensus;
+use crate::proto::dref_consensus::{
     AppendEntriesRequest, AppendEntriesResponse, HeartbeatRequest, HeartbeatResponse,
     InstallSnapshotRequest, InstallSnapshotResponse, VoteRequest, VoteResponse,
 };
+use crate::state_command::StateCommand;
 use crate::state_machine::{unix_millis, ApplyResult};
 
-/// gRPC adapter for the public DRefRaft service. All requests are routed
-/// through `consensus`; non-leaders surface `NotLeader` to the client as
-/// described above.
 #[derive(Clone)]
 pub struct DRefRaftService {
     consensus: Arc<Consensus>,
-    /// Known node ids, returned by `GetEndpoints`. The list matches the
-    /// fixed cluster membership; we don't currently support dynamic
-    /// reconfiguration.
     endpoint_ids: Vec<String>,
 }
 
@@ -54,9 +39,6 @@ impl DRefRaftService {
         }
     }
 
-    /// Translate a consensus error into a gRPC `Status`. We use
-    /// `FAILED_PRECONDITION` with a description starting with `not-leader`
-    /// so the client can recognise it without depending on metadata layout.
     fn map_err(e: ConsensusError) -> Status {
         match e {
             ConsensusError::NotLeader { leader_id } => {
@@ -66,9 +48,7 @@ impl DRefRaftService {
                 );
                 Status::failed_precondition(desc)
             }
-            ConsensusError::NoLeader => {
-                Status::failed_precondition("no-leader:unknown")
-            }
+            ConsensusError::NoLeader => Status::failed_precondition("no-leader:unknown"),
             ConsensusError::Serialize(s) => Status::internal(format!("serialize: {s}")),
             ConsensusError::Transport(s) => Status::unavailable(s),
         }
@@ -82,15 +62,8 @@ impl DRefRaft for DRefRaftService {
         request: Request<SetElementRequest>,
     ) -> Result<Response<SetElementResponse>, Status> {
         let r = request.into_inner();
-        let cmd = DRefCommand::SetElement {
-            name: r.name,
-            value: r.value,
-            expire_at: r.expire_at,
-        };
-        self.consensus
-            .submit(cmd)
-            .await
-            .map_err(Self::map_err)?;
+        let cmd = StateCommand::set_element(r.name, r.value, r.expire_at);
+        self.consensus.submit(cmd).await.map_err(Self::map_err)?;
         Ok(Response::new(SetElementResponse {}))
     }
 
@@ -99,16 +72,10 @@ impl DRefRaft for DRefRaftService {
         request: Request<SetElementIfNotExistRequest>,
     ) -> Result<Response<SetElementIfNotExistResponse>, Status> {
         let r = request.into_inner();
-        let cmd = DRefCommand::SetElementIfNotExist {
-            name: r.name,
-            value: r.value,
-            expire_at: r.expire_at,
-        };
+        let cmd = StateCommand::set_element_if_not_exist(r.name, r.value, r.expire_at);
         let res = self.consensus.submit(cmd).await.map_err(Self::map_err)?;
         let created = match res {
             ApplyResult::Created(c) => c,
-            // Any other variant from this command would be a bug; default
-            // to "not created" so we never falsely claim a write happened.
             _ => false,
         };
         Ok(Response::new(SetElementIfNotExistResponse { created }))
@@ -119,9 +86,6 @@ impl DRefRaft for DRefRaftService {
         request: Request<GetElementRequest>,
     ) -> Result<Response<GetElementResponse>, Status> {
         let r = request.into_inner();
-        // Reads go straight to the local state machine. We require the
-        // request to be served by the leader to match Scala's
-        // `QueryPolicy.LINEARIZABLE`. Non-leaders bounce to the leader.
         if !self.consensus.is_leader().await {
             return Err(Self::map_err(ConsensusError::NotLeader {
                 leader_id: self.consensus.leader_id().await,
@@ -136,7 +100,7 @@ impl DRefRaft for DRefRaftService {
         request: Request<DeleteElementRequest>,
     ) -> Result<Response<DeleteElementResponse>, Status> {
         let r = request.into_inner();
-        let cmd = DRefCommand::DeleteElement { name: r.name };
+        let cmd = StateCommand::delete_element(r.name);
         self.consensus.submit(cmd).await.map_err(Self::map_err)?;
         Ok(Response::new(DeleteElementResponse {}))
     }
@@ -146,10 +110,7 @@ impl DRefRaft for DRefRaftService {
         request: Request<ExpireElementRequest>,
     ) -> Result<Response<ExpireElementResponse>, Status> {
         let r = request.into_inner();
-        let cmd = DRefCommand::ExpireElement {
-            name: r.name,
-            expire_at: r.expire_at,
-        };
+        let cmd = StateCommand::expire_element(r.name, r.expire_at);
         self.consensus.submit(cmd).await.map_err(Self::map_err)?;
         Ok(Response::new(ExpireElementResponse {}))
     }
@@ -167,31 +128,24 @@ impl DRefRaft for DRefRaftService {
         &self,
         _request: Request<SendCommandRequest>,
     ) -> Result<Response<SendCommandResponse>, Status> {
-        // The Scala impl uses `SendCommand` as the transport for
-        // MicroRaft messages. Our Rust port carries Raft messages on the
-        // separate `RaftInternal` service, so this RPC is a no-op
-        // accepted for wire compatibility. A future iteration can route
-        // the bytes into the consensus layer.
-        let _ = unix_millis(); // touch to keep import used
+        let _ = unix_millis();
         Ok(Response::new(SendCommandResponse {}))
     }
 }
 
-/// gRPC adapter for the internal Raft service. Pure forwarder onto
-/// [`Consensus`] handlers.
 #[derive(Clone)]
-pub struct RaftInternalService {
+pub struct DRefConsensusService {
     consensus: Arc<Consensus>,
 }
 
-impl RaftInternalService {
+impl DRefConsensusService {
     pub fn new(consensus: Arc<Consensus>) -> Self {
         Self { consensus }
     }
 }
 
 #[tonic::async_trait]
-impl RaftInternal for RaftInternalService {
+impl DRefConsensus for DRefConsensusService {
     async fn append_entries(
         &self,
         request: Request<AppendEntriesRequest>,
@@ -233,9 +187,10 @@ impl RaftInternal for RaftInternalService {
         request: Request<InstallSnapshotRequest>,
     ) -> Result<Response<InstallSnapshotResponse>, Status> {
         let r = request.into_inner();
+        let snapshot = r.snapshot.unwrap_or_default();
         let (success, term) = self
             .consensus
-            .handle_install_snapshot(r.leader_id, r.term, r.snapshot, r.last_seq)
+            .handle_install_snapshot(r.leader_id, r.term, snapshot, r.last_seq)
             .await;
         Ok(Response::new(InstallSnapshotResponse { success, term }))
     }

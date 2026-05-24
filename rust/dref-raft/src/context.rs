@@ -36,9 +36,10 @@ type BoxStream<'a, T> = Pin<Box<dyn Stream<Item = T> + Send + 'a>>;
 use crate::config::{NodeEndpoint, RaftConfig};
 use crate::consensus::{wait_for_leader, Consensus};
 use crate::grpc_client::{ClientError, GrpcClient};
-use crate::grpc_server::{DRefRaftService, RaftInternalService};
+use crate::grpc_server::{DRefConsensusService, DRefRaftService};
 use crate::proto::dref::d_ref_raft_server::DRefRaftServer;
-use crate::proto::raft_network::raft_internal_server::RaftInternalServer;
+use crate::proto::dref_consensus::d_ref_consensus_server::DRefConsensusServer;
+use crate::state_command::StateCommand;
 use crate::state_machine::{unix_millis, StateMachine};
 
 /// Background tasks owned by a single context, joined on drop.
@@ -132,13 +133,13 @@ impl RaftDRefContext {
             .map(|e| e.id.clone())
             .collect();
         let dref_service = DRefRaftService::new(consensus.clone(), endpoint_ids.clone());
-        let raft_service = RaftInternalService::new(consensus.clone());
+        let consensus_service = DRefConsensusService::new(consensus.clone());
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         let server_task = tokio::spawn(async move {
             let svc = tonic::transport::Server::builder()
                 .add_service(DRefRaftServer::new(dref_service))
-                .add_service(RaftInternalServer::new(raft_service))
+                .add_service(DRefConsensusServer::new(consensus_service))
                 .serve_with_shutdown(addr, async move {
                     let _ = shutdown_rx.await;
                 });
@@ -169,10 +170,7 @@ impl RaftDRefContext {
                     let table = consensus_for_reaper.state_machine.expiration_table().await;
                     for (name, expire_at) in table {
                         if expire_at <= now {
-                            let cmd = crate::command::DRefCommand::DeleteIfExpired {
-                                name: name.clone(),
-                                now,
-                            };
+                            let cmd = StateCommand::delete_if_expired(name.clone(), now);
                             if let Err(e) = consensus_for_reaper.submit(cmd).await {
                                 debug!(error = ?e, key = %name, "reaper submit failed");
                             }
