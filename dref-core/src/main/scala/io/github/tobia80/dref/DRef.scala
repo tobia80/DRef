@@ -273,7 +273,7 @@ object DRef {
       traceInfo                 <-
         ZIO.fromOption(instance.unapply(trace)).orElseFail(new Throwable("No trace available"))
       lockValue                 <- Random.nextLong
-      lockValueBytes            <- fromEither(serializeToArray(lockValue)).mapError(failure => new Throwable(failure.message))
+      lockValueBytes             = LockValue.toBytes(lockValue)
       location                   = traceInfo._1
       file                       = traceInfo._2
       line                       = traceInfo._3

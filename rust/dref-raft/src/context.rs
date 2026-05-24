@@ -36,9 +36,11 @@ type BoxStream<'a, T> = Pin<Box<dyn Stream<Item = T> + Send + 'a>>;
 use crate::config::{NodeEndpoint, RaftConfig};
 use crate::consensus::{wait_for_leader, Consensus};
 use crate::grpc_client::{ClientError, GrpcClient};
-use crate::grpc_server::{DRefRaftService, RaftInternalService};
+use crate::grpc_server::{DRefConsensusService, DRefRaftService};
+use crate::ip_provider;
 use crate::proto::dref::d_ref_raft_server::DRefRaftServer;
-use crate::proto::raft_network::raft_internal_server::RaftInternalServer;
+use crate::proto::dref_consensus::d_ref_consensus_server::DRefConsensusServer;
+use crate::state_command::StateCommand;
 use crate::state_machine::{unix_millis, StateMachine};
 
 /// Background tasks owned by a single context, joined on drop.
@@ -46,6 +48,7 @@ struct Tasks {
     server: JoinHandle<()>,
     consensus_driver: JoinHandle<()>,
     reaper: JoinHandle<()>,
+    address_poll: Option<JoinHandle<()>>,
     _shutdown_tx: oneshot::Sender<()>,
 }
 
@@ -54,6 +57,9 @@ impl Drop for Tasks {
         self.server.abort();
         self.consensus_driver.abort();
         self.reaper.abort();
+        if let Some(h) = self.address_poll.take() {
+            h.abort();
+        }
     }
 }
 
@@ -74,7 +80,7 @@ struct Inner {
     default_ttl: Duration,
     /// All known peer ids including ourselves. Used to round-robin /
     /// re-resolve the leader when forwarding.
-    member_ids: Vec<String>,
+    member_ids: Arc<tokio::sync::RwLock<Vec<String>>>,
     /// Kept alive for the lifetime of the context; drop aborts tasks.
     _tasks: Tasks,
 }
@@ -88,6 +94,15 @@ impl RaftDRefContext {
     /// returning anyway (the context is usable, but the first write will
     /// retry until a leader is up).
     pub async fn start(config: RaftConfig, leader_wait: Duration) -> Result<Self, DRefError> {
+        let ip_provider = ip_provider::from_env()
+            .await
+            .map_err(|e| DRefError::Backend(e.to_string()))?;
+        let grpc_port = if config.port == 0 {
+            ip_provider::port_from_env(8082)
+        } else {
+            config.port
+        };
+
         // Derive a node id if the caller didn't provide one. Match Scala's
         // "nextLongBetween(0, 99999)" — short, easy to recognize in logs.
         let node_id = config.node_id.clone().unwrap_or_else(|| {
@@ -95,18 +110,38 @@ impl RaftDRefContext {
             rng.gen_range(0u64..99_999).to_string()
         });
 
+        let mut config = config;
+        config.port = grpc_port;
+
+        // When no peers are configured, honour DREF_* env vars (k8s, DNS, static).
+        if config.initial_endpoints.is_empty() {
+            if let Some(ref provider) = ip_provider {
+                let ips = provider
+                    .find_node_addresses()
+                    .await
+                    .map_err(|e| DRefError::Backend(e.to_string()))?;
+                config.initial_endpoints = ip_provider::node_endpoints_from_ips(&ips, grpc_port);
+                if config.bind_address.is_none() {
+                    let my_ip = provider
+                        .find_my_address()
+                        .await
+                        .map_err(|e| DRefError::Backend(e.to_string()))?;
+                    config.bind_address = Some(format!("{my_ip}:{grpc_port}"));
+                }
+            }
+        }
+
         // bind_address default mirrors the Scala impl's "localhost:<port>".
         let bind = config
             .bind_address
             .clone()
-            .unwrap_or_else(|| format!("127.0.0.1:{}", config.port));
+            .unwrap_or_else(|| format!("127.0.0.1:{}", grpc_port));
         let addr: SocketAddr = bind.parse().map_err(|e| {
             DRefError::Backend(format!("invalid bind_address '{bind}': {e}"))
         })?;
 
         // Re-write the config so the consensus / peer-lookup code can see
         // the resolved bind_address and node id.
-        let mut config = config;
         config.bind_address = Some(bind.clone());
         config.node_id = Some(node_id.clone());
 
@@ -132,13 +167,13 @@ impl RaftDRefContext {
             .map(|e| e.id.clone())
             .collect();
         let dref_service = DRefRaftService::new(consensus.clone(), endpoint_ids.clone());
-        let raft_service = RaftInternalService::new(consensus.clone());
+        let consensus_service = DRefConsensusService::new(consensus.clone());
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         let server_task = tokio::spawn(async move {
             let svc = tonic::transport::Server::builder()
                 .add_service(DRefRaftServer::new(dref_service))
-                .add_service(RaftInternalServer::new(raft_service))
+                .add_service(DRefConsensusServer::new(consensus_service))
                 .serve_with_shutdown(addr, async move {
                     let _ = shutdown_rx.await;
                 });
@@ -169,10 +204,7 @@ impl RaftDRefContext {
                     let table = consensus_for_reaper.state_machine.expiration_table().await;
                     for (name, expire_at) in table {
                         if expire_at <= now {
-                            let cmd = crate::command::DRefCommand::DeleteIfExpired {
-                                name: name.clone(),
-                                now,
-                            };
+                            let cmd = StateCommand::delete_if_expired(name.clone(), now);
                             if let Err(e) = consensus_for_reaper.submit(cmd).await {
                                 debug!(error = ?e, key = %name, "reaper submit failed");
                             }
@@ -193,16 +225,48 @@ impl RaftDRefContext {
         // still electing — first request will retry).
         let _ = wait_for_leader(&consensus, leader_wait).await;
 
+        let member_ids = Arc::new(tokio::sync::RwLock::new(endpoint_ids));
+        let address_poll = ip_provider.as_ref().map(|provider| {
+            let provider = Arc::clone(provider);
+            let client = client.clone();
+            let member_ids = Arc::clone(&member_ids);
+            let node_id = node_id.clone();
+            let bind = bind.clone();
+            let interval = config.address_poll_interval;
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(interval);
+                loop {
+                    tick.tick().await;
+                    match provider.find_node_addresses().await {
+                        Ok(ips) => {
+                            let mut endpoints =
+                                ip_provider::node_endpoints_from_ips(&ips, grpc_port);
+                            if !endpoints.iter().any(|e| e.id == node_id) {
+                                endpoints.push(NodeEndpoint::new(node_id.clone(), bind.clone()));
+                            }
+                            for ep in &endpoints {
+                                client.upsert_endpoint(ep.clone()).await;
+                            }
+                            *member_ids.write().await =
+                                endpoints.into_iter().map(|e| e.id).collect();
+                        }
+                        Err(e) => warn!(error = %e, "address poll failed"),
+                    }
+                }
+            })
+        });
+
         let inner = Inner {
             consensus,
             client,
             node_id,
             default_ttl: config.ttl.unwrap_or(Duration::from_secs(20)),
-            member_ids: endpoint_ids,
+            member_ids,
             _tasks: Tasks {
                 server: server_task,
                 consensus_driver,
                 reaper,
+                address_poll,
                 _shutdown_tx: shutdown_tx,
             },
         };
@@ -220,7 +284,7 @@ impl RaftDRefContext {
             return Ok(id);
         }
         // Otherwise probe peers in random order: any of them might know.
-        let mut ids = self.inner.member_ids.clone();
+        let mut ids = self.inner.member_ids.read().await.clone();
         {
             let mut rng = rand::thread_rng();
             for i in (1..ids.len()).rev() {

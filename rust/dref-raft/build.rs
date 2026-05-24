@@ -1,27 +1,19 @@
-// Compile the protobuf definitions for the DRefRaft service and the internal
-// Raft transport. We deliberately keep the wire format of `dref.proto` and
-// `raft.proto` 100% compatible with the Scala project (same field numbers,
-// same service names), so a Rust node and a Scala node could in principle
-// talk to each other.
-//
-// `raft_network.proto` is Rust-only: the Scala impl ships MicroRaft messages
-// as serialized Java objects, which doesn't translate to Rust.
+// Compile shared protobuf definitions from the repo-root `proto/` directory.
+// Both the Scala and Rust implementations must use these files as the single
+// source of truth for cross-language consensus compatibility.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Use the bundled protoc so the build doesn't require the user to install
-    // it system-wide. tonic-build / prost-build read $PROTOC, so just set
-    // that.
     let protoc = protoc_bin_vendored::protoc_bin_path()?;
     std::env::set_var("PROTOC", protoc);
 
-    let proto_root = std::path::PathBuf::from("proto");
+    let proto_root = std::path::PathBuf::from("../../proto");
     let protos = [
         proto_root.join("dref.proto"),
         proto_root.join("raft.proto"),
-        proto_root.join("raft_network.proto"),
+        proto_root.join("state_command.proto"),
+        proto_root.join("dref_consensus.proto"),
     ];
 
-    // Rerun if any proto changes.
     for p in &protos {
         println!("cargo:rerun-if-changed={}", p.display());
     }

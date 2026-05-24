@@ -3,7 +3,7 @@
 # separate terms of service, privacy policy, and support
 # documentation.
 
-name: Scala CI
+name: CI
 
 on:
   push:
@@ -15,7 +15,8 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  scala:
+    name: Scala
     runs-on: ubuntu-latest
     services:
       redis:
@@ -40,4 +41,33 @@ jobs:
         uses: sbt/setup-sbt@v1
       - name: Run tests
         run: sbt test
-        # Optional: This step uploads information to the GitHub dependency graph and unblocking Dependabot alerts for the repository
+
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Run workspace tests
+        run: cargo test --workspace
+      - name: Run Redis integration tests
+        run: cargo test -p dref-redis --features test-redis

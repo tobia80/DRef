@@ -331,10 +331,10 @@ impl DRefContext for RedisDRefContext {
                     Ok(v) => v,
                     Err(e) => return Some(Err(redis_err(e))),
                 };
-                // Scala: `result.forall(el => !equals(el, value))` — emit when
-                // the stored bytes differ from `value`. A missing key counts
-                // as "not stolen" (matches Scala's `forall` on `Option`).
+                // Emit when the key is missing or the stored bytes differ from
+                // the lock token we wrote (matches Scala Redis + Raft).
                 match v {
+                    None => Some(Ok(StolenElement { name: name.clone() })),
                     Some(stored) if stored != value => {
                         Some(Ok(StolenElement { name: name.clone() }))
                     }

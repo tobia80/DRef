@@ -18,6 +18,7 @@ use tokio::sync::Notify;
 use crate::context::{ChangeEvent, DRefContext};
 use crate::dref::{auto_name_for, IdProvider};
 use crate::error::{DRefError, LockStolenError};
+use crate::lock_value::to_bytes;
 
 /// Run `body` while holding a distributed lock keyed by `id`. The lock is
 /// released when `body` completes (success or failure).
@@ -60,7 +61,7 @@ where
 {
     // Random per-acquire value so we can detect "someone else stole my lock".
     let lock_value_i64: i64 = rand::thread_rng().gen();
-    let lock_value_bytes = lock_value_i64.to_be_bytes().to_vec();
+    let lock_value_bytes = to_bytes(lock_value_i64).to_vec();
     let default_ttl = context.default_ttl();
 
     // Try to acquire. If we don't get it on the first try, wait for the lock

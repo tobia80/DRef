@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package io.github.tobia80;
+
+// Language-neutral replicated log entry. Both Scala and Rust nodes encode
+// this message as the payload of AppendEntriesRequest.command and apply it
+// to the shared state machine.
+
+message StateCommand {
+  oneof op {
+    SetElementCommand set_element = 1;
+    SetElementIfNotExistCommand set_element_if_not_exist = 2;
+    DeleteElementCommand delete_element = 3;
+    ExpireElementCommand expire_element = 4;
+    DeleteIfExpiredCommand delete_if_expired = 5;
+    StartNewTermCommand start_new_term = 6;
+  }
+}
+
+message SetElementCommand {
+  string name = 1;
+  bytes value = 2;
+  optional uint64 expire_at = 3;
+}
+
+message SetElementIfNotExistCommand {
+  string name = 1;
+  bytes value = 2;
+  optional uint64 expire_at = 3;
+}
+
+message DeleteElementCommand {
+  string name = 1;
+}
+
+message ExpireElementCommand {
+  string name = 1;
+  uint64 expire_at = 2;
+}
+
+message DeleteIfExpiredCommand {
+  string name = 1;
+  uint64 now = 2;
+}
+
+message StartNewTermCommand {}
