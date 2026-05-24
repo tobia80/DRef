@@ -40,7 +40,10 @@ where
     T: Serialize + DeserializeOwned + Send + Sync + 'static,
 {
     fn serialize(&self, value: &T) -> Result<Vec<u8>, DRefError> {
-        rmp_serde::to_vec(value).map_err(|e| DRefError::Serialize(e.to_string()))
+        // Use StructMap encoding (named fields) so the wire-format matches
+        // Scala's zio-schema-msg-pack codec, which encodes case-class fields
+        // as msgpack maps keyed by field name.
+        rmp_serde::to_vec_named(value).map_err(|e| DRefError::Serialize(e.to_string()))
     }
 
     fn deserialize(&self, bytes: &[u8]) -> Result<T, DRefError> {

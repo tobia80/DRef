@@ -95,18 +95,31 @@ the rest of your code is unchanged:
 ```rust,ignore
 // Redis backend
 use dref_redis::{RedisConfig, RedisDRefContext};
-let ctx = RedisDRefContext::connect(RedisConfig::default()).await?;
+let ctx = RedisDRefContext::new(RedisConfig {
+    host: "127.0.0.1".into(),
+    port: 6379,
+    database: 0,
+    username: None,
+    password: None,
+    ca_cert: None,
+    ttl: None,
+}).await?;
 
 // Raft backend
 use dref_raft::{NodeEndpoint, RaftConfig, RaftDRefContext};
+use std::time::Duration;
 let ctx = RaftDRefContext::start(RaftConfig {
-    node_id: 1,
-    listen_addr: "0.0.0.0:8082".parse()?,
-    peers: vec![/* NodeEndpoint { id, addr } ... */],
+    port: 8082,
+    bind_address: Some("0.0.0.0:8082".into()),
+    node_id: Some("node-1".into()),
+    initial_endpoints: vec![
+        NodeEndpoint::new("node-1", "127.0.0.1:8082"),
+        // ... other peers
+    ],
     ..Default::default()
-}).await?;
+}, Duration::from_secs(5)).await?;
 
-let ref_value = dref_core::DRef::make(&ctx, || 0).await?;
+let ref_value = dref_core::DRef::make(&ctx, || 0i32).await?;
 ```
 
 Configuration notes:
