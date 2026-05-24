@@ -1,14 +1,21 @@
 # DRef
 
-[![Scala CI](https://github.com/tobia80/DRef/actions/workflows/scala.yml/badge.svg)](https://github.com/tobia80/DRef/actions/workflows/scala.yml)
+[![CI](https://github.com/tobia80/DRef/actions/workflows/scala.yml/badge.svg)](https://github.com/tobia80/DRef/actions/workflows/scala.yml)
 [![Maven Central](https://img.shields.io/maven-central/v/io.github.tobia80/dref-core_3.svg?logo=sonatype)](https://central.sonatype.com/artifact/io.github.tobia80/dref-core_3)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Scala Version](https://img.shields.io/badge/Scala-3.7.3-DC322F?logo=scala)](https://www.scala-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-stable-orange?logo=rust)](rust/README.md)
+[![Cross-language](https://img.shields.io/badge/binary%20compatible-Scala%20%2B%20Rust-blue)](#cross-language-compatibility)
 
 Distributed Ref (DRef) is a library for synchronising state and coordination
-primitives across distributed nodes in ZIO applications. It lets you treat distributed
-state the same way you would work with an ordinary `Ref`, while also giving you
-cluster-wide locks and change streams when you need stronger coordination.
+primitives across distributed nodes. The primary implementation is **Scala/ZIO**
+(in this repository root); a **Rust/Tokio** port lives in [`rust/`](rust/README.md).
+Both expose the same conceptual API and share on-the-wire formats so mixed
+clusters can interoperate.
+
+It lets you treat distributed state the same way you would work with an
+ordinary `Ref`, while also giving you cluster-wide locks and change streams
+when you need stronger coordination.
 
 DRef makes it easy to build services that stay in sync without wiring together
 custom replication logic, retry loops, or bespoke consensus code.
@@ -21,11 +28,16 @@ custom replication logic, retry loops, or bespoke consensus code.
   exclusion or subscribe to change streams to broadcast domain events.
 - **Backend flexibility.** Switch between Raft, Redis, or in-memory
   implementations to match the deployment environment.
-- **Codec agnostic.** Bring your own codecs (e.g. Desert or MsgPack) to talk to
-  services written in other languages.
+- **Cross-language binary compatibility.** Scala and Rust nodes can share the
+  same Redis keys, Raft log entries, and gRPC services when using the default
+  MsgPack codec and shared protobuf definitions (see
+  [Cross-language compatibility](#cross-language-compatibility)).
+- **Codec agnostic.** Bring your own codecs (e.g. Desert or MsgPack) on the
+  Scala side; the default MsgPack wire format is verified against the Rust port.
 
 ## When to use DRef
-DRef shines whenever you need low-latency coordination across JVM services. A
+DRef shines whenever you need low-latency coordination across distributed
+services — whether they are all on the JVM, all in Rust, or a mix of both. A
 few high-impact scenarios include:
 
 - **Leader election & failover.** Run one active worker, fail over in
@@ -174,8 +186,42 @@ identical, up-to-date metrics without central bottlenecks.
 - **Backends.**
   - `dref-raft`: consensus-backed storage for production clusters.
   - `dref-redis`: integrate with existing Redis deployments.
+  - In-memory (`DRefContext.local`): ideal for tests or local development.
+- **Rust port (`rust/`).** A Tokio-based implementation of the same API with
+  `dref-core`, `dref-redis`, and `dref-raft` crates. See [`rust/README.md`](rust/README.md)
+  for Rust-specific setup and examples.
 - **Examples.** The `example` module contains ready-to-run demos that show how
   to wire everything together with ZIO layers.
+
+## Cross-language compatibility
+
+DRef is implemented in both **Scala (ZIO)** and **Rust (Tokio)**. Mixed clusters
+are supported when both sides use the shared wire formats below — no translation
+layer or sidecar is required.
+
+| Layer | Shared contract | Verification |
+| --- | --- | --- |
+| **Core values & locks** | MsgPack codec (`rmp-serde` / `zio-schema-msg-pack`), 8-byte big-endian lock tokens | [`compat/vectors.json`](compat/vectors.json), `CrossLangCompatSpec` (Scala), `compat_tests` (Rust) |
+| **Raft log entries** | [`proto/state_command.proto`](proto/state_command.proto) | [`compat/consensus_vectors.json`](compat/consensus_vectors.json), `CrossLangConsensusCompatSpec` (Scala), `consensus_compat_tests` (Rust) |
+| **Inter-node RPC** | [`proto/dref.proto`](proto/dref.proto), [`proto/dref_consensus.proto`](proto/dref_consensus.proto) | `ProtoRaftDRefSpec` (Scala), `raft_tests` (Rust) |
+| **Redis backend** | Same key layout, TTL semantics, and keyspace-notification payloads | `CrossLangRedisSpec` (Scala), `crosslang_redis_tests` (Rust) |
+
+Run the cross-language checks from the repository root:
+
+```bash
+# Core MsgPack + lock wire format
+sbt "dref-core/testOnly io.github.tobia80.dref.CrossLangCompatSpec"
+(cd rust && cargo test -p dref-core --test compat_tests)
+
+# Raft protobuf golden bytes + cluster behaviour
+./scripts/crosslang-raft-compat.sh
+
+# Redis: Scala writes fixtures, Rust reads them (requires Redis on localhost:6379)
+./scripts/crosslang-redis-compat.sh
+```
+
+Golden byte vectors live under [`compat/`](compat/) so either language can
+regenerate or verify payloads without a running cluster.
 
 ## Testing
 Run the full test suite with:
@@ -188,6 +234,18 @@ sbt test
 > (`localhost:6379`). Redis tests will fail with connection errors if Redis
 > is not available. The `dref-raft` and `dref-core` tests run independently and
 > do not require external services.
+
+For the Rust workspace:
+
+```bash
+cd rust
+cargo test -p dref-core
+cargo test -p dref-raft
+cargo test -p dref-redis --features test-redis
+```
+
+See [Cross-language compatibility](#cross-language-compatibility) for scripts
+that verify Scala and Rust nodes agree on wire formats.
 
 ## Run the example cluster with Docker
 
