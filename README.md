@@ -43,7 +43,14 @@ few high-impact scenarios include:
 Add DRef to your `build.sbt`:
 
 ```scala
-libraryDependencies += "io.github.tobia80" %% "dref" % "<latest-version>"
+// Core (in-memory backend, good for tests and single-node usage)
+libraryDependencies += "io.github.tobia80" %% "dref-core" % "<latest-version>"
+
+// Raft consensus backend (for multi-node clusters)
+libraryDependencies += "io.github.tobia80" %% "dref-raft" % "<latest-version>"
+
+// Redis backend
+libraryDependencies += "io.github.tobia80" %% "dref-redis" % "<latest-version>"
 ```
 
 Create a distributed reference, update it, and observe the changes:
@@ -59,7 +66,7 @@ object QuickStart extends ZIOAppDefault:
       _   <- ref.update(_ + 1)
       v   <- ref.get
       _   <- ZIO.logInfo(s"Current value: $v")
-    yield ()).provideLayer(DRefContext.local)
+    yield ()).provide(DRefContext.local, Scope.default)
 ```
 
 `DRefContext.local` gives you an in-memory implementation, perfect for tests or
@@ -93,7 +100,7 @@ object LeaderElection extends ZIOAppDefault:
                         ZIO.logInfo(s"Leader already active: $leader").as(state)
                       )
                     }
-    yield ()).provideLayer(DRefContext.local)
+    yield ()).provide(DRefContext.local, Scope.default)
 ```
 
 This snippet elects a leader while ensuring every node sees the same decision.
@@ -114,7 +121,7 @@ val program =
     flags <- DRef.make(Flags(betaFeature = false, rollout = 0))
     _     <- flags.onChange(flag => ZIO.logInfo(s"Flags changed to $flag"))
     _     <- flags.set(Flags(betaFeature = true, rollout = 5))
-  yield ()).provideLayer(DRefContext.local)
+  yield ()).provide(DRefContext.local, Scope.default)
 ```
 
 Every subscriber receives updates as soon as they happen, while reads from the
@@ -132,7 +139,7 @@ object ThrottledJob extends ZIOAppDefault:
     DRef.lock(ManualId("daily-report")) {
       ZIO.logInfo("Generating report...") *>
         generateReport
-    }.provideLayer(DRefContext.local)
+    }.provide(DRefContext.local, Scope.default)
 ```
 
 If another node attempts to run `ThrottledJob` at the same time, it will block
@@ -155,7 +162,7 @@ object Metrics extends ZIOAppDefault:
       current     <- activeUsers.get
       _           <- ZIO.logInfo(s"Active users: $current")
     yield ()).repeat(Schedule.spaced(5.seconds))
-      .provideLayer(DRefContext.local)
+      .provide(DRefContext.local, Scope.default)
 ```
 
 Because updates are diffed and replicated automatically, every node can display
@@ -167,7 +174,6 @@ identical, up-to-date metrics without central bottlenecks.
 - **Backends.**
   - `dref-raft`: consensus-backed storage for production clusters.
   - `dref-redis`: integrate with existing Redis deployments.
-  - `dref-inmemory`: ideal for tests or local development.
 - **Examples.** The `example` module contains ready-to-run demos that show how
   to wire everything together with ZIO layers.
 
@@ -177,6 +183,11 @@ Run the full test suite with:
 ```bash
 sbt test
 ```
+
+> **Note:** The `dref-redis` tests require a running Redis instance
+> (`localhost:6379`). Redis tests will fail with connection errors if Redis
+> is not available. The `dref-raft` and `dref-core` tests run independently and
+> do not require external services.
 
 ## Run the example cluster with Docker
 
