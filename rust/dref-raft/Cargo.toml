@@ -1,0 +1,35 @@
+[package]
+name = "dref-raft"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Raft consensus backend for DRef (port of dref-raft Scala)"
+
+[dependencies]
+dref-core = { path = "../dref-core" }
+
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+rmp-serde = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }
+
+tonic = "0.12"
+prost = "0.13"
+prost-types = "0.13"
+
+[build-dependencies]
+tonic-build = "0.12"
+protoc-bin-vendored = "3"
+
+[dev-dependencies]
+tokio = { workspace = true }
+futures = { workspace = true }
+tracing-subscriber = "0.3"
