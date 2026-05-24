@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use rand::Rng;
+use rand::RngExt;
 use tokio::sync::Notify;
 
 use crate::context::{ChangeEvent, DRefContext};
@@ -60,7 +60,7 @@ where
     T: Send + 'static,
 {
     // Random per-acquire value so we can detect "someone else stole my lock".
-    let lock_value_i64: i64 = rand::thread_rng().gen();
+    let lock_value_i64: i64 = rand::rng().random();
     let lock_value_bytes = to_bytes(lock_value_i64).to_vec();
     let default_ttl = context.default_ttl();
 
