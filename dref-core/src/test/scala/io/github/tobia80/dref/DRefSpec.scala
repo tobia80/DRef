@@ -3,7 +3,7 @@ package io.github.tobia80.dref
 import DRef.*
 import DRef.auto.*
 import zio.test.{assertTrue, Spec, TestAspect, TestClock, TestEnvironment, ZIOSpecDefault}
-import zio.{durationInt, Ref, Scope, ZIO}
+import zio.{durationInt, Promise, Ref, Scope, ZIO}
 
 object DRefSpec extends ZIOSpecDefault {
 
@@ -28,17 +28,22 @@ object DRefSpec extends ZIOSpecDefault {
     test("locks should work") { // two fibers trying to lock the same resource, waiting 1 seconds, queue is written and sleep, when 2 seconds pass, queue is 2 elements
       for {
         list              <- Ref.make[List[Int]](Nil)
+        firstLocked       <- Promise.make[Nothing, Unit]
         fiber             <- ZIO
                                .foreachParDiscard(List(100, 200)) { id =>
                                  (ZIO.logInfo(s"Starting $id") *> DRef
-                                   .lock() {
-                                     ZIO.logInfo(s"Executing $id") *> list.update(_ :+ id) *> ZIO
-                                       .sleep(1.seconds)
+                                   .lock(ManualId("locks-should-work")) {
+                                     for {
+                                       _ <- ZIO.logInfo(s"Executing $id")
+                                       _ <- list.update(_ :+ id)
+                                       _ <- firstLocked.succeed(()).when(id == 100)
+                                       _ <- ZIO.sleep(1.seconds)
+                                     } yield ()
                                    })
                                    .delay(id.millis)
                                }
                                .fork
-        _                 <- ZIO.sleep(500.millis)
+        _                 <- firstLocked.await
         valueWithOneLock  <- list.get
         _                 <- fiber.join
         valueWithTwoLocks <- list.get
