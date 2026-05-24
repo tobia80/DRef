@@ -10,6 +10,7 @@ pub mod consensus;
 pub mod context;
 pub mod grpc_client;
 pub mod grpc_server;
+pub mod ip_provider;
 pub mod state_command;
 pub mod state_machine;
 
@@ -34,5 +35,9 @@ pub mod proto {
 
 pub use config::{NodeEndpoint, RaftConfig};
 pub use context::RaftDRefContext;
+pub use ip_provider::{
+    DnsIpProvider, IpProvider, IpProviderError, KubernetesIpProvider, LocalIpProvider,
+    StaticIpProvider, extract_endpoint_ips, from_env, node_endpoints_from_ips, port_from_env,
+};
 pub use state_command::StateCommand;
 pub use state_machine::ExpiringValue;
