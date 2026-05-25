@@ -134,7 +134,13 @@ object InteropMain extends ZIOAppDefault {
                   now <- Clock.currentDateTime
                   msg  = s"hello @${now.toLocalTime}"
                   _   <- Console.printLine(s"$BLUE[$displayName] >>> $msg$RESET")
-                  _   <- dref.set(DRefMessage(displayName, msg))
+                  _   <- dref
+                           .set(DRefMessage(displayName, msg))
+                           .catchAll(err =>
+                             Console.printLineError(
+                               s"[$displayName] failed to send message: ${err.getMessage}"
+                             )
+                           )
                 } yield ()).schedule(Schedule.spaced(interval)).forever
     } yield ()
 
