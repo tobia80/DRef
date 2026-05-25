@@ -48,6 +48,11 @@ pub enum ClientError {
     NotLeader(Option<String>),
     /// Transport-level failure. Likely transient.
     Transport(String),
+    /// We don't yet have a gRPC channel for this node id. Followers learn
+    /// the leader's random nodeId via heartbeats before the alias-refresh
+    /// task maps it to a channel; the caller should back off briefly and
+    /// retry while discovery catches up.
+    UnknownNode(String),
     /// Other gRPC error (e.g. server-side bug).
     Other(String),
 }
@@ -102,7 +107,7 @@ impl GrpcClient {
         let mut guard = self.inner.lock().await;
         let entry = guard
             .get_mut(target_id)
-            .ok_or_else(|| ClientError::Other(format!("unknown node id {target_id}")))?;
+            .ok_or_else(|| ClientError::UnknownNode(target_id.to_string()))?;
         if let Some(c) = entry.client.as_ref() {
             return Ok(c.clone());
         }
@@ -139,9 +144,39 @@ impl GrpcClient {
         );
     }
 
+    /// Replace the client map with the current discovery snapshot.
+    pub async fn sync_endpoints(&self, endpoints: Vec<NodeEndpoint>) {
+        let desired: std::collections::HashSet<String> =
+            endpoints.iter().map(|e| e.id.clone()).collect();
+        let mut guard = self.inner.lock().await;
+        guard.retain(|id, _| desired.contains(id));
+        for ep in endpoints {
+            guard
+                .entry(ep.id.clone())
+                .and_modify(|entry| entry.endpoint = ep.clone())
+                .or_insert(ClientEntry {
+                    endpoint: ep,
+                    client: None,
+                });
+        }
+    }
+
     /// All node ids we currently know about.
     pub async fn known_ids(&self) -> Vec<String> {
         self.inner.lock().await.keys().cloned().collect()
+    }
+
+    /// Snapshot of (id, address) for every known entry. Used by the peer
+    /// node-id discovery step: we walk the IP-keyed entries built from DNS,
+    /// ask each one `GetEndpoints`, and alias the real nodeId returned at
+    /// the tail of the response onto the same address.
+    pub async fn entries_snapshot(&self) -> Vec<(String, String)> {
+        self.inner
+            .lock()
+            .await
+            .iter()
+            .map(|(id, entry)| (id.clone(), entry.endpoint.address.clone()))
+            .collect()
     }
 
     pub async fn set_element(

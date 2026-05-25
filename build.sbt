@@ -42,7 +42,6 @@ val redisDeps = Seq(
 ) ++ testDeps
 
 val raftDeps = Seq(
-  "io.microraft"                   % "microraft"     % "0.7",
   "com.thesamet.scalapb.zio-grpc" %% "zio-grpc-core" % "0.6.3",
   "org.apache.commons"             % "commons-lang3" % "3.20.0",
   "io.projectreactor"              % "reactor-core"  % "3.8.5",
@@ -78,6 +77,13 @@ lazy val interopExample = module("interop-example", "interop-example", "Interop 
   .enablePlugins(JavaAppPackaging)
   .dependsOn(`core`, raft)
   .settings(noPublishSettings)
+  .settings(
+    // Without an SLF4J binding on the classpath the JVM defaults to NOP and
+    // silently swallows every Raft / gRPC log line, which makes interop
+    // failures invisible. slf4j-simple writes to stderr — good enough for a
+    // demo container.
+    libraryDependencies += "org.slf4j" % "slf4j-simple" % "2.0.16"
+  )
 
 lazy val redis = module("dref-redis", "dref-redis", "Redis backend")
   .dependsOn(`core`, `core` % "test->test")

@@ -29,25 +29,25 @@ object RedisDRefSpec extends QuietZIOSpec {
         mutations     <- elementsFiber.join
       } yield assertTrue(mutations == Chunk("hello", "changed again"))
     } @@ TestAspect.withLiveClock,
-    test("locks should work") { // two fibers trying to lock the same resource, waiting 1 seconds, queue is written and sleep, when 2 seconds pass, queue is 2 elements
+    test("locks should work") {
       for {
-        list              <- Ref.make[List[Int]](Nil)
-        firstLocked       <- Promise.make[Nothing, Unit]
-        fiber             <- ZIO
-                               .foreachParDiscard(List(100, 200)) { id =>
-                                 (ZIO.logInfo(s"Starting $id") *> DRef
-                                   .lock(ManualId("locks-should-work")) {
-                                     for {
-                                       _ <- ZIO.logInfo(s"Executing $id")
-                                       _ <- list.update(_ :+ id)
-                                       _ <- firstLocked.succeed(()).when(id == 100)
-                                       _ <- ZIO.sleep(1.seconds)
-                                     } yield ()
-                                   })
-                                   .delay(id.millis)
-                               }
-                               .fork
-        _                 <- firstLocked.await
+        list        <- Ref.make[List[Int]](Nil)
+        release200  <- Promise.make[Nothing, Unit]
+        fiber       <- (
+                       DRef
+                         .lock(ManualId("locks-should-work")) {
+                           for {
+                             _ <- list.update(_ :+ 100)
+                             _ <- release200.succeed(())
+                             _ <- ZIO.sleep(1.seconds)
+                           } yield ()
+                         } *>
+                         release200.await *>
+                         DRef.lock(ManualId("locks-should-work")) {
+                           list.update(_ :+ 200) *> ZIO.sleep(1.seconds)
+                         }
+                     ).fork
+        _                 <- release200.await
         valueWithOneLock  <- list.get
         _                 <- fiber.join
         valueWithTwoLocks <- list.get

@@ -41,6 +41,7 @@ fn make_cluster_config(ports: &[u16], idx: usize) -> RaftConfig {
         election_timeout: Duration::from_millis(400),
         heartbeat_interval: Duration::from_millis(80),
         initial_endpoints: endpoints,
+        storage_dir: None,
     }
 }
 

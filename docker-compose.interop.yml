@@ -18,6 +18,12 @@ services:
       DREF_NODE_SERVICES: dref-interop
       DREF_PORT: "8082"
       DREF_NODE_LABEL: scala
+      # When set, the node skips stdin and runs a non-interactive demo loop
+      # that broadcasts a timestamped message on a staggered schedule (each
+      # replica offsets by hostname hash so sends do not align). Comment out
+      # to fall back to the interactive (docker attach) flow.
+      # Optional: DREF_AUTO_INTERVAL_SECS (default 3)
+      DREF_AUTO_NAME: scala-auto
     expose:
       - "8082"
     stdin_open: true
@@ -37,6 +43,12 @@ services:
       DREF_PORT: "8082"
       DREF_NODE_LABEL: rust
       RUST_LOG: "warn,dref_raft=info,interop_node=info"
+      # When set, the node skips stdin and runs a non-interactive demo loop
+      # that broadcasts a timestamped message on a staggered schedule (each
+      # replica offsets by hostname hash so sends do not align). Comment out
+      # to fall back to the interactive (docker attach) flow.
+      # Optional: DREF_AUTO_INTERVAL_SECS (default 3)
+      DREF_AUTO_NAME: rust-auto
     expose:
       - "8082"
     stdin_open: true

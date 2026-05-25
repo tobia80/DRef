@@ -8,6 +8,7 @@
 pub mod config;
 pub mod consensus;
 pub mod context;
+pub mod voter_state_store;
 pub mod grpc_client;
 pub mod grpc_server;
 pub mod ip_provider;
@@ -41,3 +42,4 @@ pub use ip_provider::{
 };
 pub use state_command::StateCommand;
 pub use state_machine::ExpiringValue;
+pub use voter_state_store::{FileVoterStateStore, NoopVoterStateStore, VoterState, VoterStateStore};

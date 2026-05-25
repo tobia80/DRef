@@ -184,14 +184,18 @@ identical, up-to-date metrics without central bottlenecks.
 - **Core API (`dref-core`).** Defines the distributed reference abstraction,
   codecs, locking helpers, and change streams.
 - **Backends.**
-  - `dref-raft`: consensus-backed storage for production clusters.
+  - `dref-raft`: consensus-backed storage for production clusters. Speaks the
+    protobuf services in [`proto/`](proto/), which is the same wire format used
+    by the Rust port — so a Scala Raft cluster can include Rust nodes (and vice
+    versa) with no translation layer.
   - `dref-redis`: integrate with existing Redis deployments.
   - In-memory (`DRefContext.local`): ideal for tests or local development.
 - **Rust port (`rust/`).** A Tokio-based implementation of the same API with
   `dref-core`, `dref-redis`, and `dref-raft` crates. See [`rust/README.md`](rust/README.md)
   for Rust-specific setup and examples.
 - **Examples.** The `example` module contains ready-to-run demos that show how
-  to wire everything together with ZIO layers.
+  to wire everything together with ZIO layers. The `interop-example` module
+  showcases a mixed Scala + Rust Raft cluster.
 
 ## Cross-language compatibility
 
@@ -301,11 +305,13 @@ For a hands-on demo that Scala and Rust nodes really do participate in the
 same Raft cluster, use the interop example:
 
 ```bash
-scripts/interop-cluster.sh up         # build images + start 2 Scala + 1 Rust nodes
-scripts/interop-cluster.sh status     # see the running containers
-scripts/interop-cluster.sh attach scala   # attach to a Scala node
-scripts/interop-cluster.sh attach rust    # attach to the Rust node
-scripts/interop-cluster.sh down       # stop and clean up
+scripts/interop-cluster.sh up              # build images + start 2 Scala + 1 Rust nodes
+scripts/interop-cluster.sh list            # show replicas (scala[1], rust[1], …)
+scripts/interop-cluster.sh add scala       # add another Scala node at runtime
+scripts/interop-cluster.sh remove rust 1     # remove rust replica #1
+scripts/interop-cluster.sh interactive       # REPL to add/remove nodes while cluster runs
+scripts/interop-cluster.sh attach scala      # attach to a Scala node (chat)
+scripts/interop-cluster.sh down              # stop and clean up
 ```
 
 Each container reads a display name from stdin and broadcasts chat messages
@@ -321,7 +327,9 @@ The sources of the demo are:
 - Compose file: [`docker-compose.interop.yml`](docker-compose.interop.yml)
 - Driver script: [`scripts/interop-cluster.sh`](scripts/interop-cluster.sh)
 
-Override the replica counts with `SCALA_REPLICAS=3 RUST_REPLICAS=2 scripts/interop-cluster.sh up`.
+Override the initial replica counts with `SCALA_REPLICAS=3 RUST_REPLICAS=2 scripts/interop-cluster.sh up`.
+While the cluster is running, add or remove nodes with `add` / `remove` (or `interactive`);
+existing nodes refresh peer lists from the shared `dref-interop` DNS alias every few seconds.
 
 ## License
 

@@ -1,8 +1,9 @@
 package io.tobia80.dref
 
 import io.github.tobia80.dref.DRef.msgpack.{*, given}
-import io.github.tobia80.dref.raft.{IpProvider, RaftConfig, RaftDRefContext}
-import io.github.tobia80.dref.{DRef, ManualId}
+import io.github.tobia80.dref.raft.IpProvider
+import io.github.tobia80.dref.raft.proto.{ProtoRaftConfig, ProtoRaftDRefContext}
+import io.github.tobia80.dref.{DRef, DRefContext, ManualId}
 import zio.*
 
 import scala.Console.{BLUE, CYAN, GREEN, RESET, YELLOW}
@@ -27,11 +28,7 @@ object InteropMain extends ZIOAppDefault {
 
   private val SharedKey = "interop-chat-message"
   private val DefaultPort = 8082
-
-  private val raftConfigLayer: ZLayer[Any, Nothing, RaftConfig] = {
-    val port = sys.env.get("DREF_PORT").flatMap(_.toIntOption).getOrElse(DefaultPort)
-    ZLayer.succeed(RaftConfig(port))
-  }
+  private val LeaderWait = 60.seconds
 
   private val ipProviderLayer: ZLayer[Any, Throwable, IpProvider] = {
     def parse(name: String): Option[Seq[String]] =
@@ -49,11 +46,46 @@ object InteropMain extends ZIOAppDefault {
       .getOrElse(IpProvider.local)
   }
 
+  /** Builds a [[ProtoRaftDRefContext]] with periodic DNS/k8s peer refresh so
+    * `scripts/interop-cluster.sh add|remove` can resize the cluster at runtime.
+    */
+  private val raftContextLayer: ZLayer[IpProvider, Throwable, DRefContext] =
+    ZLayer.scoped {
+      for {
+        ipProvider <- ZIO.service[IpProvider]
+        port        = sys.env.get("DREF_PORT").flatMap(_.toIntOption).getOrElse(DefaultPort)
+        myIp       <- ipProvider.findMyAddress()
+        bindAddress = s"$myIp:$port"
+        config      = ProtoRaftConfig(port = port, bindAddress = Some(bindAddress))
+        ctx        <- ProtoRaftDRefContext.startWithAddressPolling(config, ipProvider, LeaderWait)
+      } yield ctx: DRefContext
+    }
+
   private val nodeLabel: String = {
     val role = sys.env.getOrElse("DREF_NODE_LABEL", "scala")
     val host = sys.env.get("HOSTNAME").getOrElse("unknown")
     s"$role/$host"
   }
+
+  /** djb2 — same formula as the Rust `interop-node` for stagger offsets. */
+  private def identityHash(key: String): Long = {
+    var hash = 5381L
+    for (c <- key) hash = ((hash << 5) + hash) + c.toLong
+    hash
+  }
+
+  /** Per-replica broadcast timing: initial delay + fixed interval.
+    * Stagger spreads first sends across the interval window so replicas
+    * started together do not publish in lockstep. Override with
+    * `DREF_AUTO_INTERVAL_SECS` (default 3). */
+  private def autoDemoTiming: (Duration, Duration) =
+    val intervalSecs =
+      sys.env.get("DREF_AUTO_INTERVAL_SECS").flatMap(_.toIntOption).filter(_ > 0).getOrElse(3)
+    val interval = intervalSecs.seconds
+    val identity =
+      sys.env.get("HOSTNAME").orElse(sys.env.get("DREF_NODE_LABEL")).getOrElse("node")
+    val staggerMs = math.abs(identityHash(identity)) % (intervalSecs * 1000L)
+    (staggerMs.millis, interval)
 
   private def chat(displayName: String) =
     for {
@@ -78,20 +110,66 @@ object InteropMain extends ZIOAppDefault {
               }
     } yield ()
 
+  /** Non-interactive demo: broadcast a timestamped message every few seconds
+    * and log everything observed. Triggered by `DREF_AUTO_NAME` so the
+    * default compose setup can show the cluster working without `docker
+    * attach`. Logs from `docker compose logs -f` should show messages from
+    * every other node crossing the language boundary. */
+  private def autoDemo(displayName: String) =
+    val (stagger, interval) = autoDemoTiming
+    for {
+      dref <- DRef.make[DRefMessage](DRefMessage("", ""), ManualId(SharedKey))
+      _    <- Console.printLine(
+                s"$GREEN[$nodeLabel] auto-demo joined as '$displayName' — " +
+                  s"first message in ${stagger.toMillis}ms, then every ${interval.toMillis}ms.$RESET"
+              )
+      _    <- dref
+                .onChange { msg =>
+                  Console
+                    .printLine(s"$CYAN<<< (${msg.name}) ${msg.message} [seen by $nodeLabel]$RESET")
+                    .when(msg.name.nonEmpty && msg.name != displayName)
+                }
+      _    <- ZIO.sleep(stagger) *>
+                (for {
+                  now <- Clock.currentDateTime
+                  msg  = s"hello @${now.toLocalTime}"
+                  _   <- Console.printLine(s"$BLUE[$displayName] >>> $msg$RESET")
+                  _   <- dref.set(DRefMessage(displayName, msg))
+                } yield ()).schedule(Schedule.spaced(interval)).forever
+    } yield ()
+
   override def run = {
     val program =
       for {
-        _     <- Console.print(s"$YELLOW[$nodeLabel] enter your display name: $RESET")
-        name0 <- Console.readLine
-        name   = Option(name0).map(_.trim).filter(_.nonEmpty).getOrElse(nodeLabel)
-        _     <- chat(name)
+        // Force the Raft engine to materialise BEFORE blocking on stdin —
+        // otherwise the Scala node would only start serving consensus RPCs
+        // once a human types a display name, which never happens in the
+        // compose setup until someone `docker attach`es.
+        ctx     <- ZIO.service[DRefContext]
+        _       <- Console.printLine(s"$GREEN[$nodeLabel] Raft node ready (DRefContext=$ctx).$RESET")
+        // Suffix the auto-name with a short hostname so each replica is
+        // distinguishable in the chat log (otherwise scala-node-1 and
+        // scala-node-2 both publish as "scala-auto" and the receiver
+        // filter hides every Scala-to-Scala message).
+        hostSuffix = sys.env.get("HOSTNAME").map(_.take(6)).filter(_.nonEmpty)
+        autoOpt  = sys.env.get("DREF_AUTO_NAME").map(_.trim).filter(_.nonEmpty).map { base =>
+                     hostSuffix.fold(base)(h => s"$base-$h")
+                   }
+        _       <- autoOpt match {
+                     case Some(name) => autoDemo(name)
+                     case None       =>
+                       for {
+                         _     <- Console.print(s"$YELLOW[$nodeLabel] enter your display name: $RESET")
+                         name0 <- Console.readLine
+                         name   = Option(name0).map(_.trim).filter(_.nonEmpty).getOrElse(nodeLabel)
+                         _     <- chat(name)
+                       } yield ()
+                   }
       } yield ()
 
     program.provide(
-      RaftDRefContext.live,
-      raftConfigLayer,
-      ipProviderLayer,
-      Scope.default
+      raftContextLayer,
+      ipProviderLayer
     )
   }
 }

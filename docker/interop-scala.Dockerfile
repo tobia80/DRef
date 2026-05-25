@@ -2,7 +2,7 @@
 # Scala node for the cross-language DRef interop demo.
 # Used by docker-compose.interop.yml together with docker/interop-rust.Dockerfile.
 
-FROM sbtscala/scala-sbt:eclipse-temurin-21.0.5_11_1.10.8_3.5.1 AS build
+FROM sbtscala/scala-sbt:eclipse-temurin-21.0.8_9_1.12.11_3.8.3 AS build
 WORKDIR /app
 
 # Project + dependency definitions first to maximise layer caching.
@@ -20,6 +20,7 @@ COPY proto ./proto
 COPY README.md ./
 COPY LICENSE ./
 
+ENV SBT_OPTS="-Xms512m -Xmx3g -XX:ReservedCodeCacheSize=256m -XX:MaxMetaspaceSize=512m"
 RUN sbt "interop-example/stage"
 
 FROM eclipse-temurin:21-jre
