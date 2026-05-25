@@ -42,6 +42,7 @@ object ProtoRaftDRefSpec extends ZIOSpecDefault {
                  ProtoRaftDRefContext.start(makeClusterConfig(ports, idx, s"node-$idx"), 2.seconds)
                }
       _     <- waitForSingleLeader(nodes)
+      _     <- waitForStableLeader(nodes)
     } yield nodes
 
   private def startSingleNode: ZIO[Scope, Throwable, ProtoRaftDRefContext] =
@@ -60,6 +61,29 @@ object ProtoRaftDRefSpec extends ZIOSpecDefault {
       }
       .timeoutFail(new RuntimeException("no leader elected"))(10.seconds)
       .unit
+
+  /** Wait until every node reports the same leader id for several polls in a row. */
+  private def waitForStableLeader(
+    nodes: List[ProtoRaftDRefContext],
+    stableChecks: Int = 4
+  ): Task[Unit] = {
+    def loop(streak: Int, lastLeader: Option[String]): Task[Unit] =
+      for {
+        leaderIds <- ZIO.foreach(nodes)(_.leaderId)
+        leaders   <- ZIO.foreach(nodes)(_.isLeader)
+        agreed     = leaderIds.flatten.toSet.size == 1 && leaderIds.forall(_.isDefined)
+        oneLeader  = leaders.count(identity) == 1
+        leader     = leaderIds.flatten.headOption
+        nextStreak =
+          if agreed && oneLeader && lastLeader.contains(leader.get) then streak + 1
+          else 0
+        _ <-
+          if nextStreak >= stableChecks then ZIO.unit
+          else ZIO.sleep(50.millis) *> loop(nextStreak, leader)
+      } yield ()
+
+    loop(0, None).timeoutFail(new RuntimeException("no stable leader"))(15.seconds).unit
+  }
 
   override def spec: Spec[TestEnvironment & Scope, Any] = suite("Proto Raft DRef")(
     test("single node cluster writes and reads") {
@@ -97,13 +121,18 @@ object ProtoRaftDRefSpec extends ZIOSpecDefault {
     },
     test("on_change_stream observes replicated writes") {
       for {
-        nodes    <- startCluster(3)
-        writer    = nodes.head
-        listener  = nodes(1)
-        fiber    <- listener.onChangeStream("events").take(1).runCollect.fork
-        _        <- ZIO.sleep(50.millis)
-        _        <- writer.setElement("events", "observed".getBytes, None)
-        events   <- fiber.join.timeout(5.seconds).some
+        nodes              <- startCluster(3)
+        (writer, listener) <- ZIO
+                                .foreach(nodes)(n => n.isLeader.map(b => (n, b)))
+                                .map { roles =>
+                                  val leader   = roles.find(_._2).map(_._1).getOrElse(nodes.head)
+                                  val follower = roles.find(!_._2).map(_._1).getOrElse(nodes(1))
+                                  (leader, follower)
+                                }
+        fiber              <- listener.onChangeStream("events").take(1).runCollect.fork
+        _                  <- ZIO.sleep(50.millis)
+        _                  <- writer.setElement("events", "observed".getBytes, None)
+        events             <- fiber.join.timeout(5.seconds).some
       } yield assertTrue(
         events.length == 1,
         events.head match {

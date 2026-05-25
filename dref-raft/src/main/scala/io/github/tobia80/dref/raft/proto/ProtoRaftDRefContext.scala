@@ -316,7 +316,7 @@ object ProtoRaftDRefContext {
                         {
                           case ClientError.NotLeader(_) =>
                             ZIO.sleep(30.millis) *> loop(0, 0)
-                          case ClientError.Transport(_) if transportAttempts < 20 =>
+                          case ClientError.Transport(_) if transportAttempts < 40 =>
                             ZIO.sleep(50.millis) *> loop(transportAttempts + 1, unknownAttempts)
                           case ClientError.Transport(msg) =>
                             ZIO.fail(new RuntimeException(s"transport error talking to leader: $msg"))
