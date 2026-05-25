@@ -5,6 +5,7 @@ members = [
     "dref-redis",
     "dref-raft",
     "examples",
+    "interop-node",
 ]
 
 [workspace.package]

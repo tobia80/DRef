@@ -295,6 +295,34 @@ sets automatically:
   of IP addresses instead of DNS names.
 - `DREF_PORT` — the port used by the gRPC server (defaults to `8082`).
 
+## Run a mixed Scala + Rust cluster locally
+
+For a hands-on demo that Scala and Rust nodes really do participate in the
+same Raft cluster, use the interop example:
+
+```bash
+scripts/interop-cluster.sh up         # build images + start 2 Scala + 1 Rust nodes
+scripts/interop-cluster.sh status     # see the running containers
+scripts/interop-cluster.sh attach scala   # attach to a Scala node
+scripts/interop-cluster.sh attach rust    # attach to the Rust node
+scripts/interop-cluster.sh down       # stop and clean up
+```
+
+Each container reads a display name from stdin and broadcasts chat messages
+through a single `DRef` named `interop-chat-message`. Because both languages
+share the protobuf schemas in [`proto/`](proto/), the MsgPack codec for the
+`DRefMessage(name, message)` record, and a manual id for the key, every node
+sees every message regardless of which language sent it.
+
+The sources of the demo are:
+
+- Scala node: [`interop-example/src/main/scala/io/tobia80/dref/InteropMain.scala`](interop-example/src/main/scala/io/tobia80/dref/InteropMain.scala)
+- Rust node: [`rust/interop-node/src/main.rs`](rust/interop-node/src/main.rs)
+- Compose file: [`docker-compose.interop.yml`](docker-compose.interop.yml)
+- Driver script: [`scripts/interop-cluster.sh`](scripts/interop-cluster.sh)
+
+Override the replica counts with `SCALA_REPLICAS=3 RUST_REPLICAS=2 scripts/interop-cluster.sh up`.
+
 ## License
 
 This project is licensed under the terms of the LICENSE file in this repository.
