@@ -116,21 +116,22 @@ object ProtoRaftDRefSpec extends ZIOSpecDefault {
       for {
         ctx               <- startSingleNode
         list              <- Ref.make[List[Int]](Nil)
-        firstLocked       <- Promise.make[Nothing, Unit]
-        fiber             <- ZIO
-                               .foreachParDiscard(List(100, 200)) { id =>
-                                 DRef
-                                   .lockWithContext(ctx, ManualId("proto-lock-serialises")) {
-                                     for {
-                                       _ <- list.update(_ :+ id)
-                                       _ <- firstLocked.succeed(()).when(id == 100)
-                                       _ <- ZIO.sleep(1.second)
-                                     } yield ()
-                                   }
-                                   .delay(id.millis)
-                               }
-                               .fork
-        _                 <- firstLocked.await
+        release200        <- Promise.make[Nothing, Unit]
+        fiber             <- (
+                               DRef
+                                 .lockWithContext(ctx, ManualId("proto-lock-serialises")) {
+                                   for {
+                                     _ <- list.update(_ :+ 100)
+                                     _ <- release200.succeed(())
+                                     _ <- ZIO.sleep(1.second)
+                                   } yield ()
+                                 } *>
+                                 release200.await *>
+                                 DRef.lockWithContext(ctx, ManualId("proto-lock-serialises")) {
+                                   list.update(_ :+ 200) *> ZIO.sleep(1.second)
+                                 }
+                             ).fork
+        _                 <- release200.await
         valueWithOneLock  <- list.get
         _                 <- fiber.join
         valueWithTwoLocks <- list.get
