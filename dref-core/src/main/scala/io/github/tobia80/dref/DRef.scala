@@ -22,6 +22,7 @@ import zio.{
   Scope,
   Task,
   Trace,
+  UIO,
   ZIO,
   ZLayer
 }
@@ -58,25 +59,13 @@ trait DRef[T] {
     }
 
   def getAndUpdateZIO[C](f: T => RIO[C, T]): RIO[C, T] =
-    modifyZIO { v =>
-      for {
-        result <- f(v)
-      } yield (v, result)
-    }
+    modifyZIO(v => f(v).map(result => (v, result)))
 
   def updateZIO[C](f: T => RIO[C, T]): RIO[C, Unit] =
-    modifyZIO { v =>
-      for {
-        result <- f(v)
-      } yield ((), result)
-    }
+    modifyZIO(v => f(v).map(result => ((), result)))
 
   def updateAndGetZIO[C](f: T => RIO[C, T]): RIO[C, T] =
-    modifyZIO { v =>
-      for {
-        result <- f(v)
-      } yield (result, result)
-    }
+    modifyZIO(v => f(v).map(result => (result, result)))
 
 }
 
@@ -117,15 +106,10 @@ private case class ExpiringValue(value: Array[Byte], expireAt: Option[Long])
 
 object DRefContext {
 
-  private def removeExpiredElements(ref: Ref[Map[String, ExpiringValue]]): ZIO[Any, Nothing, Unit] =
-    for {
-      now <- Clock.currentTime(TimeUnit.MILLISECONDS)
-      _   <- ref.update { old =>
-               old.filter { case (_, v) =>
-                 v.expireAt.forall(_ > now)
-               }
-             }
-    } yield ()
+  private def removeExpiredElements(ref: Ref[Map[String, ExpiringValue]]): UIO[Unit] =
+    Clock.currentTime(TimeUnit.MILLISECONDS).flatMap { now =>
+      ref.update(_.filter { case (_, v) => v.expireAt.forall(_ > now) })
+    }
 
   val local: ZLayer[Scope, Nothing, DRefContext] = ZLayer(for {
     ref     <- Ref.make[Map[String, ExpiringValue]](Map.empty)
@@ -320,17 +304,20 @@ object DRef {
                                      .fork
       aliveFiber                <- context.keepAliveStream(name, defaultTtl).interruptWhen(aliveInterruptStream).runDrain.fork
       result                    <- fFiber.await
-                                     .flatMap {
-                                       case zio.Exit.Success(value)                            => ZIO.succeed(value)
-                                       case zio.Exit.Failure(cause) if cause.isInterruptedOnly =>
-                                         stolen.get.flatMap { beenStolen =>
-                                           if beenStolen then
-                                             ZIO.logError(s"Stolen lock ${name} with value $lockValue") *> 
-                                             stolenLockException.await.flatMap(ZIO.fail(_))
-                                           else ZIO.failCause(cause)
-                                         }
-                                       case zio.Exit.Failure(cause)                            => ZIO.failCause(cause)
-                                     }
+                                     .flatMap(
+                                       _.foldCauseZIO(
+                                         cause =>
+                                           if cause.isInterruptedOnly then
+                                             stolen.get.flatMap { beenStolen =>
+                                               if beenStolen then
+                                                 ZIO.logError(s"Stolen lock ${name} with value $lockValue") *>
+                                                   stolenLockException.await.flatMap(ZIO.fail(_))
+                                               else ZIO.failCause(cause)
+                                             }
+                                           else ZIO.failCause(cause),
+                                         ZIO.succeed(_)
+                                       )
+                                     )
                                      .ensuring {
                                        aliveInterruptStream.succeed(()) *> stolenLockInterruptStream.succeed(()) *>
                                          stolen.get.flatMap { hasBeenStolen =>
@@ -375,14 +362,11 @@ case class ManualId(value: String) extends IdProvider
 
 class DRefImpl[T: DRefCodec](context: DRefContext)(name: String) extends DRef[T] {
 
-  override def get: Task[T] = {
-    val result: Task[Option[Array[Byte]]] = context.getElement(name)
-    result.flatMap {
-      case Some(bytes) =>
-        DRefCodec.deserializeFromArray(bytes)
-      case None        => ZIO.fail(new Throwable(s"Element $name not found"))
-    }
-  }
+  override def get: Task[T] =
+    context
+      .getElement(name)
+      .flatMap(ZIO.fromOption(_).orElseFail(new Throwable(s"Element $name not found")))
+      .flatMap(DRefCodec.deserializeFromArray)
 
   override def set(a: T): Task[Unit] = DRefCodec
     .serializeToArray(a)

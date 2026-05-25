@@ -70,13 +70,15 @@ case class RedisConfig(
   }
 
   def toOptions: ClientOptions = {
-    val socketOpts = SocketOptions.builder()
+    val socketOpts = SocketOptions
+      .builder()
       .connectTimeout(java.time.Duration.ofMillis(socket.connectTimeout.toMillis))
       .keepAlive(socket.keepAlive)
       .tcpNoDelay(socket.tcpNoDelay)
       .build()
 
-    val clientBuilder = ClientOptions.builder()
+    val clientBuilder = ClientOptions
+      .builder()
       .autoReconnect(autoReconnect)
       .disconnectedBehavior(disconnectedBehavior match
         case DisconnectedBehavior.Default        => ClientOptions.DisconnectedBehavior.DEFAULT
@@ -89,7 +91,8 @@ case class RedisConfig(
 
     commandTimeout.foreach { t =>
       clientBuilder.timeoutOptions(
-        TimeoutOptions.builder()
+        TimeoutOptions
+          .builder()
           .fixedTimeout(java.time.Duration.ofMillis(t.toMillis))
           .build()
       )
@@ -174,7 +177,6 @@ object RedisDRefContext {
         } yield ()
       }
 
-      import zio.Duration
       override def keepAliveStream(name: String, ttl: Duration): ZStream[Any, Throwable, Unit] = {
         val ttlZio = Duration.fromScala(ttl.asFiniteDuration / 1.25)
         ZStream.repeatZIOWithSchedule(expire(name, ttl), Schedule.fixed(ttlZio))
@@ -207,21 +209,22 @@ object RedisDRefContext {
       override def detectDeletionFromUnderlyingStream(
         name: String
       ): ZStream[Any, Throwable, DeleteElement] = {
-        val notExist = for {
-          result <- redisClient.get(Chunk.fromArray(name.getBytes))
-        } yield result.isEmpty
-        ZStream.repeatZIO(notExist.delay(1.second)).filter(identity).as(DeleteElement(name))
+        val notExist =
+          redisClient.get(Chunk.fromArray(name.getBytes)).map(_.isEmpty).delay(1.second)
+        ZStream.repeatZIO(notExist).filter(identity).as(DeleteElement(name))
       }
 
       override def detectStolenElement(name: String, value: Array[Byte]): ZStream[Any, Throwable, StolenElement] = {
-        val stolen = for {
-          result <- redisClient.get(Chunk.fromArray(name.getBytes))
-        } yield result match {
-          case None                                       => true
-          case Some(current) if !util.Arrays.equals(current.toArray, value) => true
-          case _                                          => false
-        }
-        ZStream.repeatZIO(stolen.delay(1.second)).filter(identity).as(StolenElement(name))
+        val stolen =
+          redisClient
+            .get(Chunk.fromArray(name.getBytes))
+            .map {
+              case None                                                         => true
+              case Some(current) if !util.Arrays.equals(current.toArray, value) => true
+              case _                                                            => false
+            }
+            .delay(1.second)
+        ZStream.repeatZIO(stolen).filter(identity).as(StolenElement(name))
       }
     }
   )

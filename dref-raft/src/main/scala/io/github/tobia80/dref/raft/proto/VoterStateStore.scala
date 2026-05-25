@@ -14,9 +14,8 @@ object VoterState {
 
 /** Persists Raft voter state (currentTerm, votedFor) across restarts.
   *
-  * Without this, a restarted node can grant a second vote in the same term and
-  * cause a split-brain — the one Raft safety invariant that *requires* stable
-  * storage even before any log persistence work.
+  * Without this, a restarted node can grant a second vote in the same term and cause a split-brain — the one Raft
+  * safety invariant that *requires* stable storage even before any log persistence work.
   */
 trait VoterStateStore {
   def load: Task[VoterState]
@@ -24,18 +23,17 @@ trait VoterStateStore {
 }
 
 object VoterStateStore {
-  private val Magic: Int    = 0x44524654 // "DRFT"
+  private val Magic: Int = 0x44524654 // "DRFT"
   private val Version: Byte = 1
-  private val FileName      = "voter-state"
-  private val TmpSuffix     = ".tmp"
+  private val FileName = "voter-state"
+  private val TmpSuffix = ".tmp"
 
-  /** In-memory no-op store. Returns empty state and discards writes — used
-    * when no `storageDir` is configured, preserving the previous in-memory
-    * behavior bit-for-bit.
+  /** In-memory no-op store. Returns empty state and discards writes — used when no `storageDir` is configured,
+    * preserving the previous in-memory behavior bit-for-bit.
     */
   val noop: VoterStateStore = new VoterStateStore {
-    def load: Task[VoterState]                 = ZIO.succeed(VoterState.empty)
-    def save(state: VoterState): Task[Unit]    = ZIO.unit
+    def load: Task[VoterState] = ZIO.succeed(VoterState.empty)
+    def save(state: VoterState): Task[Unit] = ZIO.unit
   }
 
   def file(dir: Path): Task[VoterStateStore] =
@@ -43,9 +41,9 @@ object VoterStateStore {
       .attemptBlocking(Files.createDirectories(dir))
       .as(new FileStore(dir))
 
-  private final class FileStore(dir: Path) extends VoterStateStore {
+  final private class FileStore(dir: Path) extends VoterStateStore {
     private val target = dir.resolve(FileName)
-    private val tmp    = dir.resolve(FileName + TmpSuffix)
+    private val tmp = dir.resolve(FileName + TmpSuffix)
 
     def load: Task[VoterState] =
       ZIO.attemptBlocking {
@@ -79,7 +77,7 @@ object VoterStateStore {
     val version = in.readByte()
     if version != Version then throw new IOException(s"voter-state version $version not supported")
     val term = in.readLong()
-    val len  = in.readInt()
+    val len = in.readInt()
     val votedFor =
       if len < 0 then None
       else {

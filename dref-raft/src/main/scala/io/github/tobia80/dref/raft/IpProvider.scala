@@ -13,8 +13,8 @@ trait IpProvider {
 object IpProvider {
 
   def k8s(
-      serviceName: String,
-      namespace: String
+    serviceName: String,
+    namespace: String
   ): ZLayer[Any, Throwable, IpProvider] =
     KubernetesIpProvider.live(serviceName, namespace)
 
@@ -32,10 +32,8 @@ object IpProvider {
     new IpProvider {
       override def findNodeAddresses(): Task[List[String]] = ZIO.succeed(ips.toList)
 
-      override def findMyAddress(): Task[String] = ZIO.attempt {
-        import java.net.InetAddress
-        InetAddress.getLocalHost.getHostAddress
-      }
+      override def findMyAddress(): Task[String] =
+        ZIO.attemptBlocking(java.net.InetAddress.getLocalHost.getHostAddress)
 
       override def expectedEndpoints: Task[Int] = ZIO.succeed(ips.size)
     }
@@ -43,17 +41,14 @@ object IpProvider {
 
   def dnsBased(services: String*): ZLayer[Any, Nothing, IpProvider] = ZLayer.succeed {
     new IpProvider {
-      override def findNodeAddresses(): Task[List[String]] = ZIO.attempt {
-        import java.net.InetAddress
-        services.flatMap { service =>
-          InetAddress.getAllByName(service).map(_.getHostAddress)
-        }.toList
-      }
+      override def findNodeAddresses(): Task[List[String]] =
+        ZIO.attemptBlocking {
+          import java.net.InetAddress
+          services.flatMap(service => InetAddress.getAllByName(service).map(_.getHostAddress)).toList
+        }
 
-      override def findMyAddress(): Task[String] = ZIO.attempt {
-        import java.net.InetAddress
-        InetAddress.getLocalHost.getHostAddress
-      }
+      override def findMyAddress(): Task[String] =
+        ZIO.attemptBlocking(java.net.InetAddress.getLocalHost.getHostAddress)
 
       override def expectedEndpoints: Task[Int] = findNodeAddresses().map(_.size)
     }

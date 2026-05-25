@@ -20,7 +20,7 @@ trait ProtoRaftDRefContext extends DRefContext {
 
 object ProtoRaftDRefContext {
 
-  private final class ProtoDRefClient(
+  final private class ProtoDRefClient(
     ipClientsRef: Ref[Map[String, DRefRaftClient]],
     aliasRef: Ref[Map[String, DRefRaftClient]]
   ) {
@@ -104,44 +104,43 @@ object ProtoRaftDRefContext {
     leaderWait: Duration = 500.millis
   ): ZIO[Scope, Throwable, ProtoRaftDRefContext] =
     for {
-      ips         <- ipProvider.findNodeAddresses()
-      myIp        <- ipProvider.findMyAddress()
-      port         = config.port
-      bindAddress  = config.bindAddress.getOrElse(s"$myIp:$port")
-      endpoints    = ips.map(ip => NodeEndpoint(ip, s"$ip:$port"))
-      ctx         <- start(config.copy(bindAddress = Some(bindAddress), initialEndpoints = endpoints), leaderWait)
-      _           <- addressPollLoop(ipProvider, ctx, config.addressPollInterval).forkScoped
+      ips        <- ipProvider.findNodeAddresses()
+      myIp       <- ipProvider.findMyAddress()
+      port        = config.port
+      bindAddress = config.bindAddress.getOrElse(s"$myIp:$port")
+      endpoints   = ips.map(ip => NodeEndpoint(ip, s"$ip:$port"))
+      ctx        <- start(config.copy(bindAddress = Some(bindAddress), initialEndpoints = endpoints), leaderWait)
+      _          <- addressPollLoop(ipProvider, ctx, config.addressPollInterval).forkScoped
     } yield ctx
 
   def start(config: ProtoRaftConfig, leaderWait: Duration = 500.millis): ZIO[Scope, Throwable, ProtoRaftDRefContext] =
     for {
-      nodeId <- config.nodeId match {
-                  case Some(id) => ZIO.succeed(id)
-                  case None       => Random.nextLongBetween(0L, 99_999L).map(_.toString)
-                }
-      bindAddress = config.bindAddress.getOrElse(s"127.0.0.1:${config.port}")
+      nodeId         <- ZIO.fromOption(config.nodeId).orElse(Random.nextLongBetween(0L, 99_999L).map(_.toString))
+      bindAddress     = config.bindAddress.getOrElse(s"127.0.0.1:${config.port}")
       // IP-based discovery uses the IP itself as a placeholder endpoint id,
       // so our own address would otherwise stay in the peer list (whose
       // self-skip matches on nodeId) and inflate the quorum. Drop any
       // endpoint pointing at our bind, then add ourselves once under nodeId.
-      endpoints   = config.initialEndpoints.filterNot(_.address == bindAddress) :+
-                      NodeEndpoint(nodeId, bindAddress)
-      memberIds   = endpoints.map(_.id)
-      stateMachine <- ProtoStateMachine.make
-      resolvedConfig = config.copy(nodeId = Some(nodeId), initialEndpoints = endpoints)
-      consensus    <- ProtoConsensusEngine.make(nodeId, stateMachine, resolvedConfig)
-      drefServer    = new ProtoDRefGrpcServer(consensus, memberIds)
+      endpoints       = config.initialEndpoints.filterNot(_.address == bindAddress) :+
+                          NodeEndpoint(nodeId, bindAddress)
+      memberIds       = endpoints.map(_.id)
+      stateMachine   <- ProtoStateMachine.make
+      resolvedConfig  = config.copy(nodeId = Some(nodeId), initialEndpoints = endpoints)
+      consensus      <- ProtoConsensusEngine.make(nodeId, stateMachine, resolvedConfig)
+      drefServer      = new ProtoDRefGrpcServer(consensus, memberIds)
       consensusServer = new DRefConsensusGrpcServer(consensus)
-      builder       = ServerBuilder.forPort(config.port).addService(ProtoReflectionService.newInstance())
-      services      = ServiceList.add(drefServer).add(consensusServer)
-      _            <- ServerLayer.fromServiceList(builder, services).launch.forkScoped
-      _            <- waitForLocalGrpcServer(config.port)
-      clients      <- ZIO.foreach(endpoints) { ep =>
-                        DRefRaftClient
-                          .scoped(GrpcChannels.managedChannel(ep.address))
-                          .map(ep.id -> _)
-                      }.map(_.toMap)
-      clientsRef   <- Ref.make(clients)
+      builder         = ServerBuilder.forPort(config.port).addService(ProtoReflectionService.newInstance())
+      services        = ServiceList.add(drefServer).add(consensusServer)
+      _              <- ServerLayer.fromServiceList(builder, services).launch.forkScoped
+      _              <- waitForLocalGrpcServer(config.port)
+      clients        <- ZIO
+                          .foreach(endpoints) { ep =>
+                            DRefRaftClient
+                              .scoped(GrpcChannels.managedChannel(ep.address))
+                              .map(ep.id -> _)
+                          }
+                          .map(_.toMap)
+      clientsRef     <- Ref.make(clients)
       // IP-based discovery keys peers by IP, but consensus identifies them by
       // real nodeId (heartbeats carry leader_id = randomly-chosen string).
       // Probe each peer's GetEndpoints — by convention the last entry in the
@@ -152,15 +151,15 @@ object ProtoRaftDRefContext {
       // gRPC when we probe them, and one-shot discovery would leave the alias
       // permanently missing. Periodic refresh also covers rolling restarts
       // that hand a peer a new random nodeId.
-      aliasRef     <- Ref.make(Map.empty[String, DRefRaftClient])
-      _            <- refreshAliases(clientsRef, nodeId, aliasRef)
-      _            <- refreshAliases(clientsRef, nodeId, aliasRef)
-                        .repeat(Schedule.spaced(1.second))
-                        .forkScoped
-      client         = new ProtoDRefClient(clientsRef, aliasRef)
-      _            <- consensus.spawnDrivers
-      _            <- ttlReaper(consensus).forkScoped
-      _            <- ProtoConsensusEngine.waitForLeader(consensus, leaderWait)
+      aliasRef       <- Ref.make(Map.empty[String, DRefRaftClient])
+      _              <- refreshAliases(clientsRef, nodeId, aliasRef)
+      _              <- refreshAliases(clientsRef, nodeId, aliasRef)
+                          .repeat(Schedule.spaced(1.second))
+                          .forkScoped
+      client          = new ProtoDRefClient(clientsRef, aliasRef)
+      _              <- consensus.spawnDrivers
+      _              <- ttlReaper(consensus).forkScoped
+      _              <- ProtoConsensusEngine.waitForLeader(consensus, leaderWait)
     } yield new Impl(nodeId, resolvedConfig, consensus, stateMachine, client, clientsRef, aliasRef, memberIds)
 
   private def addressPollLoop(
@@ -171,15 +170,15 @@ object ProtoRaftDRefContext {
     val impl = ctx.asInstanceOf[Impl]
     val poll =
       for {
-        ips           <- ipProvider.findNodeAddresses()
-        port           = impl.config.port
-        bindAddress    = impl.config.bindAddress.getOrElse(s"127.0.0.1:$port")
-        endpoints      = ips.map(ip => NodeEndpoint(ip, s"$ip:$port"))
-        peerEndpoints  = endpoints.filterNot(_.address == bindAddress)
-        allEndpoints   = peerEndpoints :+ NodeEndpoint(impl.nodeId, bindAddress)
-        _             <- impl.consensus.syncPeers(peerEndpoints, impl.nodeId, bindAddress)
-        _             <- syncRaftClients(impl.clientsRef, allEndpoints)
-        _             <- refreshAliases(impl.clientsRef, impl.nodeId, impl.aliasRef)
+        ips          <- ipProvider.findNodeAddresses()
+        port          = impl.config.port
+        bindAddress   = impl.config.bindAddress.getOrElse(s"127.0.0.1:$port")
+        endpoints     = ips.map(ip => NodeEndpoint(ip, s"$ip:$port"))
+        peerEndpoints = endpoints.filterNot(_.address == bindAddress)
+        allEndpoints  = peerEndpoints :+ NodeEndpoint(impl.nodeId, bindAddress)
+        _            <- impl.consensus.syncPeers(peerEndpoints, impl.nodeId, bindAddress)
+        _            <- syncRaftClients(impl.clientsRef, allEndpoints)
+        _            <- refreshAliases(impl.clientsRef, impl.nodeId, impl.aliasRef)
       } yield ()
     poll.catchAll(_ => ZIO.unit).repeat(Schedule.spaced(interval)).unit
 
@@ -198,7 +197,7 @@ object ProtoRaftDRefContext {
                      .scoped(GrpcChannels.managedChannel(ep.address))
                      .map(ep.id -> _)
                  }
-      _ <- clientsRef.update(_ ++ added.toMap).when(added.nonEmpty)
+      _       <- clientsRef.update(_ ++ added.toMap).when(added.nonEmpty)
     } yield ()
 
   private def refreshAliases(
@@ -209,19 +208,19 @@ object ProtoRaftDRefContext {
     ipClientsRef.get.flatMap { ipClients =>
       ZIO
         .foreach(ipClients.toList) { case (id, raftClient) =>
-        if id == selfNodeId then ZIO.succeed(None)
-        else
-          raftClient
-            .getEndpoints(GetEndpointsRequest())
-            .either
-            .map {
-              case Right(resp) if resp.ids.nonEmpty =>
-                val realId = resp.ids.last
-                if realId != id && realId != selfNodeId then Some(realId -> raftClient)
-                else None
-              case _ => None
-            }
-      }
+          if id == selfNodeId then ZIO.succeed(None)
+          else
+            raftClient
+              .getEndpoints(GetEndpointsRequest())
+              .either
+              .map {
+                case Right(resp) if resp.ids.nonEmpty =>
+                  val realId = resp.ids.last
+                  if realId != id && realId != selfNodeId then Some(realId -> raftClient)
+                  else None
+                case _                                => None
+              }
+        }
         .flatMap { pairs =>
           val discovered = pairs.flatten.toMap
           // Merge rather than replace so a transient unreachable peer doesn't
@@ -230,7 +229,7 @@ object ProtoRaftDRefContext {
         }
     }
 
-  private final class Impl(
+  final private class Impl(
     override val nodeId: String,
     val config: ProtoRaftConfig,
     val consensus: ProtoConsensusEngine,
@@ -312,7 +311,7 @@ object ProtoRaftDRefContext {
         for {
           expireAt <- ttlToExpireAt(ttl)
           result   <- currentLeader.either.flatMap {
-                        case Left(_) =>
+                        case Left(_)       =>
                           // Membership changes (add/remove) can leave the cluster
                           // leaderless for several seconds while peers refresh and
                           // an election completes — retry like NotLeader.
@@ -320,11 +319,11 @@ object ProtoRaftDRefContext {
                         case Right(leader) =>
                           op(leader, expireAt).foldZIO(
                             {
-                              case ClientError.NotLeader(_) =>
+                              case ClientError.NotLeader(_)                           =>
                                 ZIO.sleep(30.millis) *> loop(0, 0)
                               case ClientError.Transport(_) if transportAttempts < 40 =>
                                 ZIO.sleep(50.millis) *> loop(transportAttempts + 1, unknownAttempts)
-                              case ClientError.Transport(msg) =>
+                              case ClientError.Transport(msg)                         =>
                                 ZIO.fail(new RuntimeException(s"transport error talking to leader: $msg"))
                               // Followers learn the leader's random nodeId via
                               // heartbeats before the alias-refresh fiber maps
@@ -333,9 +332,9 @@ object ProtoRaftDRefContext {
                               // the caller with a transient routing miss.
                               case ClientError.UnknownNode(_) if unknownAttempts < 20 =>
                                 ZIO.sleep(100.millis) *> loop(transportAttempts, unknownAttempts + 1)
-                              case ClientError.UnknownNode(target) =>
+                              case ClientError.UnknownNode(target)                    =>
                                 ZIO.fail(new RuntimeException(s"unknown node id $target"))
-                              case ClientError.Other(msg) =>
+                              case ClientError.Other(msg)                             =>
                                 ZIO.fail(new RuntimeException(msg))
                             },
                             ZIO.succeed(_)
@@ -356,10 +355,9 @@ object ProtoRaftDRefContext {
       consensus.leaderId.flatMap {
         case Some(id) => ZIO.succeed(id)
         case None     =>
-          ProtoConsensusEngine.waitForLeader(consensus, 1.second).flatMap {
-            case Some(id) => ZIO.succeed(id)
-            case None       => ZIO.fail(new RuntimeException("no leader elected"))
-          }
+          ProtoConsensusEngine
+            .waitForLeader(consensus, 1.second)
+            .flatMap(ZIO.fromOption(_).orElseFail(new RuntimeException("no leader elected")))
       }
   }
 

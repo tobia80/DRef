@@ -11,6 +11,7 @@ import java.util.concurrent.ConcurrentHashMap
 import scala.jdk.CollectionConverters.*
 
 sealed trait ApplyResult
+
 object ApplyResult {
   case object Unit extends ApplyResult
   final case class Created(created: Boolean) extends ApplyResult
@@ -31,10 +32,11 @@ final class ProtoStateMachine private (changesHub: Hub[ChangeEvent]) {
 
       case StateCommand.Op.SetElementIfNotExist(SetElementIfNotExistCommand(name, value, expireAt, _)) =>
         if innerMap.containsKey(name) then ZIO.succeed(ApplyResult.Created(false))
-        else
+        else {
           val bytes = value.toByteArray
           innerMap.put(name, ExpiringValue(bytes, expireAt))
           changesHub.publish(SetElement(name, bytes)).as(ApplyResult.Created(true))
+        }
 
       case StateCommand.Op.DeleteElement(DeleteElementCommand(name, _)) =>
         innerMap.remove(name)
@@ -93,6 +95,7 @@ final class ProtoStateMachine private (changesHub: Hub[ChangeEvent]) {
 }
 
 object ProtoStateMachine {
+
   def make: ZIO[Any, Nothing, ProtoStateMachine] =
     Hub.bounded[ChangeEvent](256).map(new ProtoStateMachine(_))
 }

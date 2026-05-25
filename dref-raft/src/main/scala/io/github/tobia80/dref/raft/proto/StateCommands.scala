@@ -4,6 +4,7 @@ import com.google.protobuf.ByteString
 import io.github.tobia80.state_command.*
 
 object StateCommands {
+
   def setElement(name: String, value: Array[Byte], expireAt: Option[Long]): StateCommand =
     StateCommand(
       StateCommand.Op.SetElement(
