@@ -19,11 +19,11 @@ final class ProtoDRefGrpcServer(
             s"not-leader:${leaderId.getOrElse("unknown")}"
           )
         )
-      case ConsensusError.NoLeader =>
+      case ConsensusError.NoLeader            =>
         new StatusException(Status.FAILED_PRECONDITION.withDescription("no-leader:unknown"))
-      case ConsensusError.Serialize(message) =>
+      case ConsensusError.Serialize(message)  =>
         new StatusException(Status.INTERNAL.withDescription(s"serialize: $message"))
-      case ConsensusError.Transport(message) =>
+      case ConsensusError.Transport(message)  =>
         new StatusException(Status.UNAVAILABLE.withDescription(message))
     }
 
@@ -61,11 +61,14 @@ final class ProtoDRefGrpcServer(
       response <-
         if !isLeader then ZIO.fail(mapErr(ConsensusError.NotLeader(leaderId)))
         else
-          consensus.stateMachine.get(request.name).mapError { err =>
-            new StatusException(Status.INTERNAL.withDescription(err.getMessage))
-          }.map { value =>
-            GetElementResponse(value.map(com.google.protobuf.ByteString.copyFrom))
-          }
+          consensus.stateMachine
+            .get(request.name)
+            .mapError { err =>
+              new StatusException(Status.INTERNAL.withDescription(err.getMessage))
+            }
+            .map { value =>
+              GetElementResponse(value.map(com.google.protobuf.ByteString.copyFrom))
+            }
     } yield response
 
   override def deleteElement(

@@ -21,7 +21,7 @@ object Main extends ZIOAppDefault {
   private val NodesAddresses = "DREF_NODE_ADDRESSES"
   private val NodesServices = "DREF_NODE_SERVICES"
   private val PortEnvironment = "DREF_PORT"
-  private val K8sService   = "DREF_K8S_SERVICE"
+  private val K8sService = "DREF_K8S_SERVICE"
   private val K8sNamespace = "DREF_K8S_NAMESPACE"
 
   private val ipProviderLayer: ZLayer[Any, Throwable, IpProvider] = {
@@ -85,9 +85,10 @@ object Main extends ZIOAppDefault {
         _    <- ZIO.service[DRefContext]
         _    <- Console.print("Please enter your name: ")
         name <- Console.readLine
-        _    <- Console.printLine(
-                  s"Hello, $name! Every message you type will be echoed back to you and to all subscribers. Type 'exit' to quit."
-                )
+        _    <-
+          Console.printLine(
+            s"Hello, $name! Every message you type will be echoed back to you and to all subscribers. Type 'exit' to quit."
+          )
         _    <- printReadMessageAndSend(name)
       } yield ()
 
