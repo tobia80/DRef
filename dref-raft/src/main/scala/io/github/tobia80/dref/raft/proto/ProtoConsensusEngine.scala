@@ -36,12 +36,32 @@ object ConsensusError {
 final class ProtoConsensusEngine private (
   val nodeId: String,
   val stateMachine: ProtoStateMachine,
-  peers: Map[String, DRefConsensusClient],
+  peersRef: Ref[Map[String, DRefConsensusClient]],
   config: ProtoRaftConfig,
   stateRef: Ref[ConsensusState],
   voterStore: VoterStateStore,
   persistMutex: Semaphore
 ) {
+
+  /** Align consensus replication peers with the current discovery snapshot. */
+  def syncPeers(
+    endpoints: List[NodeEndpoint],
+    selfNodeId: String,
+    bindAddress: String
+  ): ZIO[Scope, Throwable, Unit] =
+    val desired = endpoints.filter(ep => ep.id != selfNodeId && ep.address != bindAddress)
+    for {
+      current <- peersRef.get
+      toRemove = current.keySet -- desired.map(_.id).toSet
+      toAdd    = desired.filter(ep => !current.contains(ep.id))
+      _       <- ZIO.foreachDiscard(toRemove)(id => peersRef.update(_ - id))
+      added   <- ZIO.foreach(toAdd) { ep =>
+                   DRefConsensusClient
+                     .scoped(GrpcChannels.managedChannel(ep.address))
+                     .map(ep.id -> _)
+                 }
+      _ <- peersRef.update(_ ++ added.toMap).when(added.nonEmpty)
+    } yield ()
 
   /** Run a state mutation and, if it changed `term` or `votedFor`, fsync the
     * new voter state to disk *before* the caller observes the result.
@@ -187,7 +207,8 @@ final class ProtoConsensusEngine private (
     driverLoop.forever.forkDaemon
 
   private def replicate(term: Long, seq: Long, command: Array[Byte]): UIO[Unit] =
-    ZIO.foreachParDiscard(peers) { case (peerId, client) =>
+    peersRef.get.flatMap { peers =>
+      ZIO.foreachParDiscard(peers) { case (peerId, client) =>
       client
         .appendEntries(
           AppendEntriesRequest(
@@ -210,6 +231,7 @@ final class ProtoConsensusEngine private (
                 sendSnapshotTo(peerId, client)
               }
         )
+      }
     }
 
   private def sendSnapshotTo(peerId: String, client: DRefConsensusClient): UIO[Unit] =
@@ -256,13 +278,15 @@ final class ProtoConsensusEngine private (
 
   private def sendHeartbeats: UIO[Unit] =
     stateRef.get.flatMap { st =>
-      ZIO.foreachParDiscard(peers) { case (peerId, client) =>
-        client
-          .heartbeat(HeartbeatRequest(leaderId = nodeId, term = st.term))
-          .foldZIO(
-            _ => ZIO.unit,
-            resp => stepDownIfStale(resp.term)
-          )
+      peersRef.get.flatMap { peers =>
+        ZIO.foreachParDiscard(peers) { case (peerId, client) =>
+          client
+            .heartbeat(HeartbeatRequest(leaderId = nodeId, term = st.term))
+            .foldZIO(
+              _ => ZIO.unit,
+              resp => stepDownIfStale(resp.term)
+            )
+        }
       }
     }
 
@@ -280,6 +304,7 @@ final class ProtoConsensusEngine private (
                   }
       (term: Long, lastSeq: Long) = election
       _              <- ZIO.logInfo(s"starting election on node $nodeId term $term")
+      peers          <- peersRef.get
       responses      <- ZIO.foreachPar(peers.toList) { case (peerId, client) =>
                           client
                             .requestVote(VoteRequest(candidateId = nodeId, term = term, lastSeq = lastSeq))
@@ -317,20 +342,22 @@ final class ProtoConsensusEngine private (
     for {
       st       <- stateRef.get
       snapshot <- stateMachine.takeSnapshot
-      _        <- ZIO.foreachParDiscard(peers) { case (peerId, client) =>
-                    client
-                      .installSnapshot(
-                        InstallSnapshotRequest(
-                          leaderId = nodeId,
-                          term = st.term,
-                          snapshot = Some(snapshot),
-                          lastSeq = st.lastSeq
+      _        <- peersRef.get.flatMap { peers =>
+                    ZIO.foreachParDiscard(peers) { case (peerId, client) =>
+                      client
+                        .installSnapshot(
+                          InstallSnapshotRequest(
+                            leaderId = nodeId,
+                            term = st.term,
+                            snapshot = Some(snapshot),
+                            lastSeq = st.lastSeq
+                          )
                         )
-                      )
-                      .foldZIO(
-                        _ => ZIO.unit,
-                        resp => stepDownIfStale(resp.term)
-                      )
+                        .foldZIO(
+                          _ => ZIO.unit,
+                          resp => stepDownIfStale(resp.term)
+                        )
+                    }
                   }
     } yield ()
 
@@ -400,7 +427,8 @@ object ProtoConsensusEngine {
              .save(VoterState(initialTerm, initialVotedFor))
              .when(initialTerm != loaded.term || initialVotedFor != loaded.votedFor)
       persistMutex <- Semaphore.make(1)
-    } yield new ProtoConsensusEngine(nodeId, stateMachine, peers, config, stateRef, voterStore, persistMutex)
+      peersRef     <- Ref.make(peers)
+    } yield new ProtoConsensusEngine(nodeId, stateMachine, peersRef, config, stateRef, voterStore, persistMutex)
 
   def waitForLeader(engine: ProtoConsensusEngine, max: Duration): UIO[Option[String]] =
     ZStream

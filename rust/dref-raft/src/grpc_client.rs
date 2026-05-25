@@ -144,6 +144,23 @@ impl GrpcClient {
         );
     }
 
+    /// Replace the client map with the current discovery snapshot.
+    pub async fn sync_endpoints(&self, endpoints: Vec<NodeEndpoint>) {
+        let desired: std::collections::HashSet<String> =
+            endpoints.iter().map(|e| e.id.clone()).collect();
+        let mut guard = self.inner.lock().await;
+        guard.retain(|id, _| desired.contains(id));
+        for ep in endpoints {
+            guard
+                .entry(ep.id.clone())
+                .and_modify(|entry| entry.endpoint = ep.clone())
+                .or_insert(ClientEntry {
+                    endpoint: ep,
+                    client: None,
+                });
+        }
+    }
+
     /// All node ids we currently know about.
     pub async fn known_ids(&self) -> Vec<String> {
         self.inner.lock().await.keys().cloned().collect()

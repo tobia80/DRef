@@ -237,6 +237,7 @@ impl RaftDRefContext {
         let address_poll = ip_provider.as_ref().map(|provider| {
             let provider = Arc::clone(provider);
             let client = client.clone();
+            let consensus = consensus.clone();
             let member_ids = Arc::clone(&member_ids);
             let node_id = node_id.clone();
             let bind = bind.clone();
@@ -250,10 +251,10 @@ impl RaftDRefContext {
                             let mut endpoints =
                                 ip_provider::node_endpoints_from_ips(&ips, grpc_port);
                             endpoints.retain(|e| e.address != bind);
+                            let peer_endpoints = endpoints.clone();
                             endpoints.push(NodeEndpoint::new(node_id.clone(), bind.clone()));
-                            for ep in &endpoints {
-                                client.upsert_endpoint(ep.clone()).await;
-                            }
+                            client.sync_endpoints(endpoints.clone()).await;
+                            consensus.sync_peers(&peer_endpoints).await;
                             *member_ids.write().await =
                                 endpoints.into_iter().map(|e| e.id).collect();
                             // Refresh nodeId aliases so rolling cluster changes

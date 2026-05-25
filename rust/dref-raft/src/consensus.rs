@@ -18,15 +18,15 @@
 //! - no persistent log: commands are applied in memory only,
 //! - no log truncation on conflict (we only ever replicate from the
 //!   current leader's state, snapshot-style),
-//! - no membership changes after startup (cluster membership is the
-//!   `initial_endpoints` list).
+//! - membership is refreshed when an [`IpProvider`] is configured (DNS /
+//!   k8s polling updates peers via [`Consensus::sync_peers`]).
 //!
 //! These limits are fine for the role this crate plays: replicated locks
 //! and short-lived shared state across a fixed-size cluster. They also map
 //! cleanly onto a future swap to a real Raft implementation: the public
 //! [`Consensus`] API doesn't expose anything that would change.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -135,7 +135,7 @@ struct ConsensusState {
 #[derive(Clone)]
 pub struct Consensus {
     pub node_id: String,
-    peers: Arc<HashMap<String, Arc<PeerConn>>>,
+    peers: Arc<RwLock<HashMap<String, Arc<PeerConn>>>>,
     pub state_machine: StateMachine,
     state: Arc<RwLock<ConsensusState>>,
     config: RaftConfig,
@@ -195,7 +195,7 @@ impl Consensus {
         }
         Self {
             node_id,
-            peers: Arc::new(peers),
+            peers: Arc::new(RwLock::new(peers)),
             state_machine,
             state: Arc::new(RwLock::new(ConsensusState {
                 role: initial_role,
@@ -208,6 +208,19 @@ impl Consensus {
             config,
             voter_store,
             persist_mutex: Arc::new(Mutex::new(())),
+        }
+    }
+
+    /// Align the consensus peer map with the current discovery snapshot.
+    /// Endpoints must not include this node (callers filter by node id / bind).
+    pub async fn sync_peers(&self, endpoints: &[NodeEndpoint]) {
+        let desired: HashSet<String> = endpoints.iter().map(|e| e.id.clone()).collect();
+        let mut peers = self.peers.write().await;
+        peers.retain(|id, _| desired.contains(id));
+        for ep in endpoints {
+            peers
+                .entry(ep.id.clone())
+                .or_insert_with(|| Arc::new(PeerConn::new(ep.clone())));
         }
     }
 
@@ -286,7 +299,11 @@ impl Consensus {
             // anyway so the gRPC server can self-forward in tests.
             return self.config.bind_address.clone();
         }
-        self.peers.get(&lid).map(|p| p.endpoint.address.clone())
+        self.peers
+            .read()
+            .await
+            .get(&lid)
+            .map(|p| p.endpoint.address.clone())
     }
 
     /// Submit a write command. Must be called on the leader; returns
@@ -324,10 +341,15 @@ impl Consensus {
     /// don't fail the submit — see top-of-file note on the simplified
     /// quorum model.
     async fn replicate(&self, term: u64, seq: u64, command: Vec<u8>) {
+        let peers: Vec<(String, Arc<PeerConn>)> = self
+            .peers
+            .read()
+            .await
+            .iter()
+            .map(|(id, p)| (id.clone(), Arc::clone(p)))
+            .collect();
         let mut tasks = Vec::new();
-        for (id, peer) in self.peers.iter() {
-            let id = id.clone();
-            let peer = Arc::clone(peer);
+        for (id, peer) in peers {
             let command = command.clone();
             let leader_id = self.node_id.clone();
             let timeout = self.config.connection_timeout;
@@ -581,9 +603,14 @@ impl Consensus {
             let st = self.state.read().await;
             (st.term, st.last_seq)
         };
-        for (id, peer) in self.peers.iter() {
-            let id = id.clone();
-            let peer = Arc::clone(peer);
+        let peers: Vec<(String, Arc<PeerConn>)> = self
+            .peers
+            .read()
+            .await
+            .iter()
+            .map(|(id, p)| (id.clone(), Arc::clone(p)))
+            .collect();
+        for (id, peer) in peers {
             let leader_id = self.node_id.clone();
             let timeout = self.config.connection_timeout;
             let last_seq_for_peer = last_seq;
@@ -632,14 +659,19 @@ impl Consensus {
 
         // Tally: 1 vote (us). The peer count is the rest of the cluster;
         // majority is over the FULL cluster including us.
-        let cluster_size = self.peers.len() + 1;
+        let peers: Vec<(String, Arc<PeerConn>)> = self
+            .peers
+            .read()
+            .await
+            .iter()
+            .map(|(id, p)| (id.clone(), Arc::clone(p)))
+            .collect();
+        let cluster_size = peers.len() + 1;
         let needed = cluster_size / 2 + 1;
         let mut votes: usize = 1;
 
         let mut futs = Vec::new();
-        for (id, peer) in self.peers.iter() {
-            let id = id.clone();
-            let peer = Arc::clone(peer);
+        for (id, peer) in peers {
             let candidate_id = self.node_id.clone();
             let timeout = self.config.connection_timeout;
             futs.push(tokio::spawn(async move {
@@ -698,9 +730,14 @@ impl Consensus {
             (st.term, st.last_seq)
         };
         let snapshot = self.state_machine.take_snapshot().await;
-        for (id, peer) in self.peers.iter() {
-            let id = id.clone();
-            let peer = Arc::clone(peer);
+        let peers: Vec<(String, Arc<PeerConn>)> = self
+            .peers
+            .read()
+            .await
+            .iter()
+            .map(|(id, p)| (id.clone(), Arc::clone(p)))
+            .collect();
+        for (id, peer) in peers {
             let leader_id = self.node_id.clone();
             let timeout = self.config.connection_timeout;
             let snapshot = snapshot.clone();

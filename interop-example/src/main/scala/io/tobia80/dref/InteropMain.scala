@@ -2,7 +2,7 @@ package io.tobia80.dref
 
 import io.github.tobia80.dref.DRef.msgpack.{*, given}
 import io.github.tobia80.dref.raft.IpProvider
-import io.github.tobia80.dref.raft.proto.{NodeEndpoint, ProtoRaftConfig, ProtoRaftDRefContext}
+import io.github.tobia80.dref.raft.proto.{ProtoRaftConfig, ProtoRaftDRefContext}
 import io.github.tobia80.dref.{DRef, DRefContext, ManualId}
 import zio.*
 
@@ -46,27 +46,18 @@ object InteropMain extends ZIOAppDefault {
       .getOrElse(IpProvider.local)
   }
 
-  /** Builds a [[ProtoRaftDRefContext]] (the gRPC-based engine that is wire-compatible with the Rust `interop-node`
-    * crate) by resolving peer addresses through the configured [[IpProvider]] before starting the consensus stack.
+  /** Builds a [[ProtoRaftDRefContext]] with periodic DNS/k8s peer refresh so
+    * `scripts/interop-cluster.sh add|remove` can resize the cluster at runtime.
     */
   private val raftContextLayer: ZLayer[IpProvider, Throwable, DRefContext] =
     ZLayer.scoped {
       for {
         ipProvider <- ZIO.service[IpProvider]
         port        = sys.env.get("DREF_PORT").flatMap(_.toIntOption).getOrElse(DefaultPort)
-        peerIps    <- ipProvider.findNodeAddresses()
         myIp       <- ipProvider.findMyAddress()
         bindAddress = s"$myIp:$port"
-        // Each discovered IP becomes a placeholder endpoint keyed by the IP itself;
-        // ProtoRaftDRefContext.start strips the one matching our bind and re-adds it
-        // under the real nodeId so we don't appear in our own peer list.
-        endpoints   = peerIps.map(ip => NodeEndpoint(ip, s"$ip:$port")).toList
-        config      = ProtoRaftConfig(
-                        port = port,
-                        bindAddress = Some(bindAddress),
-                        initialEndpoints = endpoints
-                      )
-        ctx        <- ProtoRaftDRefContext.start(config, LeaderWait)
+        config      = ProtoRaftConfig(port = port, bindAddress = Some(bindAddress))
+        ctx        <- ProtoRaftDRefContext.startWithAddressPolling(config, ipProvider, LeaderWait)
       } yield ctx: DRefContext
     }
 
@@ -75,6 +66,26 @@ object InteropMain extends ZIOAppDefault {
     val host = sys.env.get("HOSTNAME").getOrElse("unknown")
     s"$role/$host"
   }
+
+  /** djb2 — same formula as the Rust `interop-node` for stagger offsets. */
+  private def identityHash(key: String): Long = {
+    var hash = 5381L
+    for (c <- key) hash = ((hash << 5) + hash) + c.toLong
+    hash
+  }
+
+  /** Per-replica broadcast timing: initial delay + fixed interval.
+    * Stagger spreads first sends across the interval window so replicas
+    * started together do not publish in lockstep. Override with
+    * `DREF_AUTO_INTERVAL_SECS` (default 3). */
+  private def autoDemoTiming: (Duration, Duration) =
+    val intervalSecs =
+      sys.env.get("DREF_AUTO_INTERVAL_SECS").flatMap(_.toIntOption).filter(_ > 0).getOrElse(3)
+    val interval = intervalSecs.seconds
+    val identity =
+      sys.env.get("HOSTNAME").orElse(sys.env.get("DREF_NODE_LABEL")).getOrElse("node")
+    val staggerMs = math.abs(identityHash(identity)) % (intervalSecs * 1000L)
+    (staggerMs.millis, interval)
 
   private def chat(displayName: String) =
     for {
@@ -105,10 +116,12 @@ object InteropMain extends ZIOAppDefault {
     * attach`. Logs from `docker compose logs -f` should show messages from
     * every other node crossing the language boundary. */
   private def autoDemo(displayName: String) =
+    val (stagger, interval) = autoDemoTiming
     for {
       dref <- DRef.make[DRefMessage](DRefMessage("", ""), ManualId(SharedKey))
       _    <- Console.printLine(
-                s"$GREEN[$nodeLabel] auto-demo joined as '$displayName' — broadcasting every 3s.$RESET"
+                s"$GREEN[$nodeLabel] auto-demo joined as '$displayName' — " +
+                  s"first message in ${stagger.toMillis}ms, then every ${interval.toMillis}ms.$RESET"
               )
       _    <- dref
                 .onChange { msg =>
@@ -116,12 +129,13 @@ object InteropMain extends ZIOAppDefault {
                     .printLine(s"$CYAN<<< (${msg.name}) ${msg.message} [seen by $nodeLabel]$RESET")
                     .when(msg.name.nonEmpty && msg.name != displayName)
                 }
-      _    <- (for {
-                now <- Clock.currentDateTime
-                msg  = s"hello @${now.toLocalTime}"
-                _   <- Console.printLine(s"$BLUE[$displayName] >>> $msg$RESET")
-                _   <- dref.set(DRefMessage(displayName, msg))
-              } yield ()).schedule(Schedule.spaced(3.seconds)).forever
+      _    <- ZIO.sleep(stagger) *>
+                (for {
+                  now <- Clock.currentDateTime
+                  msg  = s"hello @${now.toLocalTime}"
+                  _   <- Console.printLine(s"$BLUE[$displayName] >>> $msg$RESET")
+                  _   <- dref.set(DRefMessage(displayName, msg))
+                } yield ()).schedule(Schedule.spaced(interval)).forever
     } yield ()
 
   override def run = {

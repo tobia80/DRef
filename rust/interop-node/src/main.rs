@@ -39,6 +39,32 @@ fn node_label() -> String {
     format!("{role}/{host}")
 }
 
+/// djb2 — same formula as Scala `InteropMain` for stagger offsets.
+fn identity_hash(key: &str) -> u64 {
+    key.bytes().fold(5381u64, |hash, b| hash.wrapping_mul(33).wrapping_add(u64::from(b)))
+}
+
+/// Per-replica broadcast timing: initial delay + fixed interval.
+/// Stagger spreads first sends across the interval window so replicas
+/// started together do not publish in lockstep. Override with
+/// `DREF_AUTO_INTERVAL_SECS` (default 3).
+fn auto_demo_timing() -> (Duration, Duration) {
+    let interval_secs: u64 = env::var("DREF_AUTO_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(3);
+    let identity = env::var("HOSTNAME")
+        .or_else(|_| env::var("DREF_NODE_LABEL"))
+        .unwrap_or_else(|_| "node".to_string());
+    let window_ms = interval_secs.saturating_mul(1000);
+    let stagger_ms = identity_hash(&identity) % window_ms;
+    (
+        Duration::from_millis(stagger_ms),
+        Duration::from_secs(interval_secs),
+    )
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
@@ -174,8 +200,10 @@ async fn run_auto_demo<C>(
 where
     C: dref_core::DRefContext + Clone + Send + Sync + 'static,
 {
+    let (stagger, interval) = auto_demo_timing();
     println!(
-        "\x1b[32m[{label}] auto-demo joined as '{display_name}' — broadcasting every 3s.\x1b[0m"
+        "\x1b[32m[{label}] auto-demo joined as '{display_name}' — \
+         first message in {stagger:?}, then every {interval:?}.\x1b[0m"
     );
 
     // Listener task.
@@ -200,7 +228,9 @@ where
         });
     }
 
-    let mut tick = tokio::time::interval(Duration::from_secs(3));
+    let start = tokio::time::Instant::now() + stagger;
+    let mut tick = tokio::time::interval_at(start, interval);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
         let now = std::time::SystemTime::now()

@@ -3,6 +3,7 @@ package io.github.tobia80.dref.raft.proto
 import com.google.protobuf.ByteString
 import io.github.tobia80.dref.*
 import io.github.tobia80.dref.ZioDref.DRefRaftClient
+import io.github.tobia80.dref.raft.IpProvider
 import io.grpc.protobuf.services.ProtoReflectionService
 import io.grpc.{ServerBuilder, StatusException}
 import scalapb.zio_grpc.{ServerLayer, ServiceList}
@@ -20,7 +21,7 @@ trait ProtoRaftDRefContext extends DRefContext {
 object ProtoRaftDRefContext {
 
   private final class ProtoDRefClient(
-    ipClients: Map[String, DRefRaftClient],
+    ipClientsRef: Ref[Map[String, DRefRaftClient]],
     aliasRef: Ref[Map[String, DRefRaftClient]]
   ) {
 
@@ -37,7 +38,7 @@ object ProtoRaftDRefContext {
     }
 
     private def call[A](targetId: String)(op: DRefRaftClient => IO[StatusException, A]): IO[ClientError, A] =
-      aliasRef.get.flatMap { aliases =>
+      (aliasRef.get zip ipClientsRef.get).flatMap { case (aliases, ipClients) =>
         aliases.get(targetId).orElse(ipClients.get(targetId)) match {
           case None         => ZIO.fail(ClientError.UnknownNode(targetId))
           case Some(client) => op(client).mapError(fromStatus)
@@ -96,6 +97,22 @@ object ProtoRaftDRefContext {
     case Other(message: String)
   }
 
+  /** Start a Raft node and periodically refresh peers from `ipProvider`. */
+  def startWithAddressPolling(
+    config: ProtoRaftConfig,
+    ipProvider: IpProvider,
+    leaderWait: Duration = 500.millis
+  ): ZIO[Scope, Throwable, ProtoRaftDRefContext] =
+    for {
+      ips         <- ipProvider.findNodeAddresses()
+      myIp        <- ipProvider.findMyAddress()
+      port         = config.port
+      bindAddress  = config.bindAddress.getOrElse(s"$myIp:$port")
+      endpoints    = ips.map(ip => NodeEndpoint(ip, s"$ip:$port"))
+      ctx         <- start(config.copy(bindAddress = Some(bindAddress), initialEndpoints = endpoints), leaderWait)
+      _           <- addressPollLoop(ipProvider, ctx, config.addressPollInterval).forkScoped
+    } yield ctx
+
   def start(config: ProtoRaftConfig, leaderWait: Duration = 500.millis): ZIO[Scope, Throwable, ProtoRaftDRefContext] =
     for {
       nodeId <- config.nodeId match {
@@ -124,6 +141,7 @@ object ProtoRaftDRefContext {
                           .scoped(GrpcChannels.managedChannel(ep.address))
                           .map(ep.id -> _)
                       }.map(_.toMap)
+      clientsRef   <- Ref.make(clients)
       // IP-based discovery keys peers by IP, but consensus identifies them by
       // real nodeId (heartbeats carry leader_id = randomly-chosen string).
       // Probe each peer's GetEndpoints — by convention the last entry in the
@@ -135,23 +153,62 @@ object ProtoRaftDRefContext {
       // permanently missing. Periodic refresh also covers rolling restarts
       // that hand a peer a new random nodeId.
       aliasRef     <- Ref.make(Map.empty[String, DRefRaftClient])
-      _            <- refreshAliases(clients, nodeId, aliasRef)
-      _            <- refreshAliases(clients, nodeId, aliasRef)
+      _            <- refreshAliases(clientsRef, nodeId, aliasRef)
+      _            <- refreshAliases(clientsRef, nodeId, aliasRef)
                         .repeat(Schedule.spaced(1.second))
                         .forkScoped
-      client         = new ProtoDRefClient(clients, aliasRef)
+      client         = new ProtoDRefClient(clientsRef, aliasRef)
       _            <- consensus.spawnDrivers
       _            <- ttlReaper(consensus).forkScoped
       _            <- ProtoConsensusEngine.waitForLeader(consensus, leaderWait)
-    } yield new Impl(nodeId, resolvedConfig, consensus, stateMachine, client, memberIds)
+    } yield new Impl(nodeId, resolvedConfig, consensus, stateMachine, client, clientsRef, aliasRef, memberIds)
+
+  private def addressPollLoop(
+    ipProvider: IpProvider,
+    ctx: ProtoRaftDRefContext,
+    interval: Duration
+  ): ZIO[Scope, Nothing, Unit] =
+    val impl = ctx.asInstanceOf[Impl]
+    val poll =
+      for {
+        ips           <- ipProvider.findNodeAddresses()
+        port           = impl.config.port
+        bindAddress    = impl.config.bindAddress.getOrElse(s"127.0.0.1:$port")
+        endpoints      = ips.map(ip => NodeEndpoint(ip, s"$ip:$port"))
+        peerEndpoints  = endpoints.filterNot(_.address == bindAddress)
+        allEndpoints   = peerEndpoints :+ NodeEndpoint(impl.nodeId, bindAddress)
+        _             <- impl.consensus.syncPeers(peerEndpoints, impl.nodeId, bindAddress)
+        _             <- syncRaftClients(impl.clientsRef, allEndpoints)
+        _             <- refreshAliases(impl.clientsRef, impl.nodeId, impl.aliasRef)
+      } yield ()
+    poll.catchAll(_ => ZIO.unit).repeat(Schedule.spaced(interval)).unit
+
+  private def syncRaftClients(
+    clientsRef: Ref[Map[String, DRefRaftClient]],
+    endpoints: List[NodeEndpoint]
+  ): ZIO[Scope, Throwable, Unit] =
+    for {
+      current <- clientsRef.get
+      desired  = endpoints.map(ep => ep.id -> ep.address).toMap
+      toRemove = current.keySet -- desired.keySet
+      toAdd    = endpoints.filter(ep => !current.contains(ep.id))
+      _       <- ZIO.foreachDiscard(toRemove)(id => clientsRef.update(_ - id))
+      added   <- ZIO.foreach(toAdd) { ep =>
+                   DRefRaftClient
+                     .scoped(GrpcChannels.managedChannel(ep.address))
+                     .map(ep.id -> _)
+                 }
+      _ <- clientsRef.update(_ ++ added.toMap).when(added.nonEmpty)
+    } yield ()
 
   private def refreshAliases(
-    ipClients: Map[String, DRefRaftClient],
+    ipClientsRef: Ref[Map[String, DRefRaftClient]],
     selfNodeId: String,
     aliasRef: Ref[Map[String, DRefRaftClient]]
   ): UIO[Unit] =
-    ZIO
-      .foreach(ipClients.toList) { case (id, raftClient) =>
+    ipClientsRef.get.flatMap { ipClients =>
+      ZIO
+        .foreach(ipClients.toList) { case (id, raftClient) =>
         if id == selfNodeId then ZIO.succeed(None)
         else
           raftClient
@@ -165,19 +222,22 @@ object ProtoRaftDRefContext {
               case _ => None
             }
       }
-      .flatMap { pairs =>
-        val discovered = pairs.flatten.toMap
-        // Merge rather than replace so a transient unreachable peer doesn't
-        // drop a previously-learned alias mid-flight.
-        aliasRef.update(_ ++ discovered)
-      }
+        .flatMap { pairs =>
+          val discovered = pairs.flatten.toMap
+          // Merge rather than replace so a transient unreachable peer doesn't
+          // drop a previously-learned alias mid-flight.
+          aliasRef.update(_ ++ discovered)
+        }
+    }
 
   private final class Impl(
     override val nodeId: String,
-    config: ProtoRaftConfig,
-    consensus: ProtoConsensusEngine,
+    val config: ProtoRaftConfig,
+    val consensus: ProtoConsensusEngine,
     stateMachine: ProtoStateMachine,
     client: ProtoDRefClient,
+    val clientsRef: Ref[Map[String, DRefRaftClient]],
+    val aliasRef: Ref[Map[String, DRefRaftClient]],
     memberIds: Seq[String]
   ) extends ProtoRaftDRefContext {
 
