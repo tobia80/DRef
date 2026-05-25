@@ -32,11 +32,15 @@ use std::time::Duration;
 
 use rand::RngExt;
 use tokio::sync::{Mutex, RwLock};
+use std::sync::Arc as StdArc;
 use tokio::time::{sleep, Instant};
 use tracing::{debug, info, warn};
 
 use crate::config::{NodeEndpoint, RaftConfig};
 use crate::proto::dref_consensus::d_ref_consensus_client::DRefConsensusClient;
+use crate::voter_state_store::{
+    FileVoterStateStore, NoopVoterStateStore, VoterState, VoterStateStore,
+};
 use crate::proto::dref_consensus::{
     AppendEntriesRequest, ClusterSnapshot, HeartbeatRequest, InstallSnapshotRequest, VoteRequest,
 };
@@ -135,20 +139,33 @@ pub struct Consensus {
     pub state_machine: StateMachine,
     state: Arc<RwLock<ConsensusState>>,
     config: RaftConfig,
+    voter_store: StdArc<dyn VoterStateStore>,
+    persist_mutex: Arc<Mutex<()>>,
 }
 
 impl Consensus {
     /// Build a new consensus node. Peers must NOT include `self`.
     pub fn new(node_id: String, state_machine: StateMachine, config: RaftConfig) -> Self {
+        let voter_store: StdArc<dyn VoterStateStore> = match &config.storage_dir {
+            Some(dir) => StdArc::new(
+                FileVoterStateStore::open(dir)
+                    .expect("create voter-state storage directory"),
+            ),
+            None => StdArc::new(NoopVoterStateStore),
+        };
+        let loaded = voter_store
+            .load()
+            .expect("load persisted voter state");
         let mut peers = HashMap::new();
         for ep in &config.initial_endpoints {
             if ep.id != node_id {
                 peers.insert(ep.id.clone(), Arc::new(PeerConn::new(ep.clone())));
             }
         }
-        // A single-node "cluster" is its own leader from t=0. This also
-        // makes tests with one node trivial.
-        let initial_role = if peers.is_empty() {
+        let has_persisted = loaded.term > 0 || loaded.voted_for.is_some();
+        // A single-node cluster bootstraps as leader only when there is no
+        // prior on-disk state — otherwise run the election path.
+        let initial_role = if peers.is_empty() && !has_persisted {
             Role::Leader
         } else {
             Role::Follower
@@ -158,21 +175,93 @@ impl Consensus {
         } else {
             None
         };
-        let term = if initial_role == Role::Leader { 1 } else { 0 };
+        let initial_term = if initial_role == Role::Leader {
+            1
+        } else {
+            loaded.term
+        };
+        let initial_voted_for = if initial_role == Role::Leader {
+            None
+        } else {
+            loaded.voted_for.clone()
+        };
+        if initial_term != loaded.term || initial_voted_for != loaded.voted_for {
+            voter_store
+                .save(&VoterState {
+                    term: initial_term,
+                    voted_for: initial_voted_for.clone(),
+                })
+                .expect("persist bootstrap voter state");
+        }
         Self {
             node_id,
             peers: Arc::new(peers),
             state_machine,
             state: Arc::new(RwLock::new(ConsensusState {
                 role: initial_role,
-                term,
-                voted_for: None,
+                term: initial_term,
+                voted_for: initial_voted_for,
                 leader_id,
                 last_seq: 0,
                 last_heartbeat: Instant::now(),
             })),
             config,
+            voter_store,
+            persist_mutex: Arc::new(Mutex::new(())),
         }
+    }
+
+    /// Mutate consensus state and fsync `(term, votedFor)` when either changes.
+    async fn update_and_persist<A, F>(&self, f: F) -> A
+    where
+        F: FnOnce(ConsensusState) -> (A, ConsensusState),
+    {
+        let _guard = self.persist_mutex.lock().await;
+        let mut st = self.state.write().await;
+        let before_term = st.term;
+        let before_vote = st.voted_for.clone();
+        let current = ConsensusState {
+            role: st.role,
+            term: st.term,
+            voted_for: st.voted_for.clone(),
+            leader_id: st.leader_id.clone(),
+            last_seq: st.last_seq,
+            last_heartbeat: st.last_heartbeat,
+        };
+        let (result, next) = f(current);
+        *st = next;
+        let after_term = st.term;
+        let after_vote = st.voted_for.clone();
+        drop(st);
+        if after_term != before_term || after_vote != before_vote {
+            self.voter_store
+                .save(&VoterState {
+                    term: after_term,
+                    voted_for: after_vote,
+                })
+                .expect("persist voter state");
+        }
+        result
+    }
+
+    /// Exposed for integration tests that assert stale-leader demotion.
+    #[doc(hidden)]
+    pub async fn test_step_down_if_stale(&self, observed_term: u64) {
+        self.step_down_if_stale(observed_term).await
+    }
+
+    async fn step_down_if_stale(&self, observed_term: u64) {
+        self.update_and_persist(|mut st| {
+            if observed_term > st.term {
+                st.term = observed_term;
+                st.role = Role::Follower;
+                st.voted_for = None;
+                st.leader_id = None;
+                st.last_heartbeat = Instant::now();
+            }
+            ((), st)
+        })
+        .await;
     }
 
     pub async fn role(&self) -> Role {
@@ -242,7 +331,6 @@ impl Consensus {
             let command = command.clone();
             let leader_id = self.node_id.clone();
             let timeout = self.config.connection_timeout;
-            let state = Arc::clone(&self.state);
             let this = self.clone();
             tasks.push(tokio::spawn(async move {
                 match peer.client(timeout).await {
@@ -256,7 +344,7 @@ impl Consensus {
                         match client.append_entries(req).await {
                             Ok(resp) => {
                                 let resp = resp.into_inner();
-                                step_down_if_stale(&state, resp.term).await;
+                                this.step_down_if_stale(resp.term).await;
                                 // A follower whose last_seq diverges from
                                 // ours rejects with success=false; without a
                                 // catch-up the strict seq check keeps
@@ -303,7 +391,7 @@ impl Consensus {
                 };
                 match client.install_snapshot(req).await {
                     Ok(resp) => {
-                        step_down_if_stale(&self.state, resp.into_inner().term).await;
+                        self.step_down_if_stale(resp.into_inner().term).await;
                     }
                     Err(e) => {
                         debug!(peer = %peer_id, error = ?e, "InstallSnapshot catch-up failed");
@@ -327,25 +415,29 @@ impl Consensus {
         seq: u64,
         command: Vec<u8>,
     ) -> (bool, u64) {
-        let mut st = self.state.write().await;
-        if term < st.term {
-            return (false, st.term);
+        let (accepted, current_term) = self
+            .update_and_persist(|mut st| {
+                if term < st.term {
+                    return ((false, st.term), st);
+                }
+                if term > st.term {
+                    st.term = term;
+                    st.voted_for = None;
+                }
+                st.role = Role::Follower;
+                st.leader_id = Some(leader_id.clone());
+                st.last_heartbeat = Instant::now();
+                if seq != st.last_seq + 1 {
+                    return ((false, st.term), st);
+                }
+                st.last_seq = seq;
+                ((true, st.term), st)
+            })
+            .await;
+
+        if !accepted {
+            return (false, current_term);
         }
-        if term > st.term {
-            st.term = term;
-            st.voted_for = None;
-        }
-        st.role = Role::Follower;
-        st.leader_id = Some(leader_id);
-        st.last_heartbeat = Instant::now();
-        // Strict ordering: only accept the very next seq. A leader that's
-        // ahead must InstallSnapshot first.
-        if seq != st.last_seq + 1 {
-            return (false, st.term);
-        }
-        st.last_seq = seq;
-        let current_term = st.term;
-        drop(st);
 
         match state_command::decode(&command) {
             Ok(cmd) => {
@@ -362,18 +454,20 @@ impl Consensus {
     /// Handle an incoming heartbeat. Updates `last_heartbeat` and
     /// learns about the current leader; never changes data.
     pub async fn handle_heartbeat(&self, leader_id: String, term: u64) -> (bool, u64) {
-        let mut st = self.state.write().await;
-        if term < st.term {
-            return (false, st.term);
-        }
-        if term > st.term {
-            st.term = term;
-            st.voted_for = None;
-        }
-        st.role = Role::Follower;
-        st.leader_id = Some(leader_id);
-        st.last_heartbeat = Instant::now();
-        (true, st.term)
+        self.update_and_persist(|mut st| {
+            if term < st.term {
+                return ((false, st.term), st);
+            }
+            if term > st.term {
+                st.term = term;
+                st.voted_for = None;
+            }
+            st.role = Role::Follower;
+            st.leader_id = Some(leader_id);
+            st.last_heartbeat = Instant::now();
+            ((true, st.term), st)
+        })
+        .await
     }
 
     /// Handle a vote request from a candidate. Grants iff we haven't voted
@@ -386,27 +480,29 @@ impl Consensus {
         term: u64,
         last_seq: u64,
     ) -> (bool, u64) {
-        let mut st = self.state.write().await;
-        if term < st.term {
-            return (false, st.term);
-        }
-        if term > st.term {
-            st.term = term;
-            st.voted_for = None;
-            st.role = Role::Follower;
-        }
-        let up_to_date = last_seq >= st.last_seq;
-        let can_vote = st
-            .voted_for
-            .as_ref()
-            .map(|v| v == &candidate_id)
-            .unwrap_or(true);
-        let granted = up_to_date && can_vote;
-        if granted {
-            st.voted_for = Some(candidate_id);
-            st.last_heartbeat = Instant::now();
-        }
-        (granted, st.term)
+        self.update_and_persist(|mut st| {
+            if term < st.term {
+                return ((false, st.term), st);
+            }
+            if term > st.term {
+                st.term = term;
+                st.voted_for = None;
+                st.role = Role::Follower;
+            }
+            let up_to_date = last_seq >= st.last_seq;
+            let can_vote = st
+                .voted_for
+                .as_ref()
+                .map(|v| v == &candidate_id)
+                .unwrap_or(true);
+            let granted = up_to_date && can_vote;
+            if granted {
+                st.voted_for = Some(candidate_id);
+                st.last_heartbeat = Instant::now();
+            }
+            ((granted, st.term), st)
+        })
+        .await
     }
 
     /// Handle an incoming snapshot. Replaces local state wholesale.
@@ -417,23 +513,27 @@ impl Consensus {
         snapshot: ClusterSnapshot,
         last_seq: u64,
     ) -> (bool, u64) {
-        let mut st = self.state.write().await;
-        if term < st.term {
-            return (false, st.term);
-        }
-        if term > st.term {
-            st.term = term;
-            st.voted_for = None;
-        }
-        st.role = Role::Follower;
-        st.leader_id = Some(leader_id);
-        st.last_heartbeat = Instant::now();
-        st.last_seq = last_seq;
-        let current_term = st.term;
-        drop(st);
+        let (accepted, current_term) = self
+            .update_and_persist(|mut st| {
+                if term < st.term {
+                    return ((false, st.term), st);
+                }
+                if term > st.term {
+                    st.term = term;
+                    st.voted_for = None;
+                }
+                st.role = Role::Follower;
+                st.leader_id = Some(leader_id);
+                st.last_heartbeat = Instant::now();
+                st.last_seq = last_seq;
+                ((true, st.term), st)
+            })
+            .await;
 
-        self.state_machine.install_snapshot(snapshot).await;
-        (true, current_term)
+        if accepted {
+            self.state_machine.install_snapshot(snapshot).await;
+        }
+        (accepted, current_term)
     }
 
     // --- Background loops ---------------------------------------------------
@@ -487,7 +587,7 @@ impl Consensus {
             let leader_id = self.node_id.clone();
             let timeout = self.config.connection_timeout;
             let last_seq_for_peer = last_seq;
-            let state = Arc::clone(&self.state);
+            let this = self.clone();
             tokio::spawn(async move {
                 match peer.client(timeout).await {
                     Ok(mut client) => {
@@ -497,7 +597,7 @@ impl Consensus {
                         };
                         match client.heartbeat(req).await {
                             Ok(resp) => {
-                                step_down_if_stale(&state, resp.into_inner().term).await;
+                                this.step_down_if_stale(resp.into_inner().term).await;
                             }
                             Err(e) => {
                                 debug!(peer = %id, error = ?e, "heartbeat failed");
@@ -518,16 +618,16 @@ impl Consensus {
     }
 
     async fn start_election(&self) {
-        let (term, last_seq) = {
-            let mut st = self.state.write().await;
-            // If we're already a fresh candidate in this loop, skip.
-            st.role = Role::Candidate;
-            st.term += 1;
-            st.voted_for = Some(self.node_id.clone());
-            st.leader_id = None;
-            st.last_heartbeat = Instant::now();
-            (st.term, st.last_seq)
-        };
+        let (term, last_seq) = self
+            .update_and_persist(|mut st| {
+                st.role = Role::Candidate;
+                st.term += 1;
+                st.voted_for = Some(self.node_id.clone());
+                st.leader_id = None;
+                st.last_heartbeat = Instant::now();
+                ((st.term, st.last_seq), st)
+            })
+            .await;
         info!(node = %self.node_id, term, "starting election");
 
         // Tally: 1 vote (us). The peer count is the rest of the cluster;
@@ -563,13 +663,7 @@ impl Consensus {
         for fut in futs {
             if let Ok(Some((_id, resp))) = fut.await {
                 if resp.term > term {
-                    // Saw a higher term — step down.
-                    let mut st = self.state.write().await;
-                    if resp.term > st.term {
-                        st.term = resp.term;
-                        st.role = Role::Follower;
-                        st.voted_for = None;
-                    }
+                    self.step_down_if_stale(resp.term).await;
                     return;
                 }
                 if resp.granted {
@@ -610,7 +704,7 @@ impl Consensus {
             let leader_id = self.node_id.clone();
             let timeout = self.config.connection_timeout;
             let snapshot = snapshot.clone();
-            let state = Arc::clone(&self.state);
+            let this = self.clone();
             tokio::spawn(async move {
                 match peer.client(timeout).await {
                     Ok(mut client) => {
@@ -622,7 +716,7 @@ impl Consensus {
                         };
                         match client.install_snapshot(req).await {
                             Ok(resp) => {
-                                step_down_if_stale(&state, resp.into_inner().term).await;
+                                this.step_down_if_stale(resp.into_inner().term).await;
                             }
                             Err(e) => {
                                 debug!(peer = %id, error = ?e, "InstallSnapshot failed");
@@ -634,22 +728,6 @@ impl Consensus {
                 }
             });
         }
-    }
-}
-
-/// Step down to follower when an outgoing heartbeat / append / snapshot
-/// response carries a term greater than ours — the follower has sprinted
-/// ahead (likely because of a partition heal) and we are no longer leader.
-/// Without this step, the cluster can deadlock with a stale leader still
-/// believing it is in charge.
-async fn step_down_if_stale(state: &Arc<RwLock<ConsensusState>>, observed_term: u64) {
-    let mut st = state.write().await;
-    if observed_term > st.term {
-        st.term = observed_term;
-        st.role = Role::Follower;
-        st.voted_for = None;
-        st.leader_id = None;
-        st.last_heartbeat = Instant::now();
     }
 }
 

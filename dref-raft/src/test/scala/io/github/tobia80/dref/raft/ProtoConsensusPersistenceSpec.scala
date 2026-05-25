@@ -124,6 +124,20 @@ object ProtoConsensusPersistenceSpec extends ZIOSpecDefault {
         persisted == VoterState(3L, Some("candidate-z"))
       )
     },
+    test("with storageDir, denies a second vote to a different candidate in the same term") {
+      for {
+        dir     <- tempDir
+        engine  <- makeEngine(Some(dir))
+        _       <- engine.handleVote("candidate-y", term = 21L, lastSeq = 0L)
+        denied  <- engine.handleVote("other-candidate", term = 21L, lastSeq = 0L)
+        verifier <- VoterStateStore.file(dir)
+        persisted <- verifier.load
+      } yield assertTrue(
+        !denied._1,
+        denied._2 == 21L,
+        persisted == VoterState(21L, Some("candidate-y"))
+      )
+    },
     test("single-node bootstrap with storageDir persists term=1 immediately") {
       for {
         dir       <- tempDir

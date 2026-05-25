@@ -1,0 +1,17 @@
+{
+  "description": "Golden on-disk voter-state bytes (magic DRFT). Shared by VoterStateStoreSpec (Scala) and voter_state_store_tests.rs (Rust).",
+  "vectors": [
+    {
+      "name": "term_7_no_vote",
+      "term": 7,
+      "voted_for": null,
+      "hex": "44524654010000000000000007ffffffff"
+    },
+    {
+      "name": "term_42_voted_node_7",
+      "term": 42,
+      "voted_for": "node-7",
+      "hex": "4452465401000000000000002a000000066e6f64652d37"
+    }
+  ]
+}

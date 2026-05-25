@@ -120,6 +120,22 @@ object VoterStateStoreSpec extends ZIOSpecDefault {
         _     <- store.save(VoterState(123L, Some("ignored")))
         state <- store.load
       } yield assertTrue(state == VoterState.empty)
+    },
+    test("on-disk bytes match cross-language golden vectors") {
+      for {
+        dir    <- tempDir
+        store  <- VoterStateStore.file(dir)
+        _      <- store.save(VoterState(7L, None))
+        noVote <- ZIO.attemptBlocking(Files.readAllBytes(dir.resolve("voter-state")))
+        _      <- store.save(VoterState(42L, Some("node-7")))
+        voted  <- ZIO.attemptBlocking(Files.readAllBytes(dir.resolve("voter-state")))
+      } yield assertTrue(
+        hex(noVote) == "44524654010000000000000007ffffffff",
+        hex(voted) == "4452465401000000000000002a000000066e6f64652d37"
+      )
     }
   ) @@ TestAspect.sequential
+
+  private def hex(bytes: Array[Byte]): String =
+    bytes.map(b => f"$b%02x").mkString
 }

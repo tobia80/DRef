@@ -1,5 +1,6 @@
 //! Configuration types for [`crate::RaftDRefContext`].
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// Address of a node in the cluster. `id` is a stable identifier (typically
@@ -48,6 +49,9 @@ pub struct RaftConfig {
     /// Initial cluster membership. The first node should be reachable so
     /// joining nodes can discover the leader.
     pub initial_endpoints: Vec<NodeEndpoint>,
+    /// Optional on-disk directory for Raft voter state (`currentTerm` +
+    /// `votedFor`). Without it, vote grants are lost across restarts.
+    pub storage_dir: Option<PathBuf>,
 }
 
 impl Default for RaftConfig {
@@ -62,6 +66,7 @@ impl Default for RaftConfig {
             election_timeout: Duration::from_millis(1500),
             heartbeat_interval: Duration::from_millis(300),
             initial_endpoints: Vec::new(),
+            storage_dir: None,
         }
     }
 }
