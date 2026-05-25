@@ -311,29 +311,36 @@ object ProtoRaftDRefContext {
       def loop(transportAttempts: Int, unknownAttempts: Int): Task[A] =
         for {
           expireAt <- ttlToExpireAt(ttl)
-          leader   <- currentLeader
-          result   <- op(leader, expireAt).foldZIO(
-                        {
-                          case ClientError.NotLeader(_) =>
-                            ZIO.sleep(30.millis) *> loop(0, 0)
-                          case ClientError.Transport(_) if transportAttempts < 40 =>
-                            ZIO.sleep(50.millis) *> loop(transportAttempts + 1, unknownAttempts)
-                          case ClientError.Transport(msg) =>
-                            ZIO.fail(new RuntimeException(s"transport error talking to leader: $msg"))
-                          // Followers learn the leader's random nodeId via
-                          // heartbeats before the alias-refresh fiber maps
-                          // it to a gRPC channel. Wait briefly so refresh
-                          // can catch up, then retry rather than failing
-                          // the caller with a transient routing miss.
-                          case ClientError.UnknownNode(_) if unknownAttempts < 20 =>
-                            ZIO.sleep(100.millis) *> loop(transportAttempts, unknownAttempts + 1)
-                          case ClientError.UnknownNode(target) =>
-                            ZIO.fail(new RuntimeException(s"unknown node id $target"))
-                          case ClientError.Other(msg) =>
-                            ZIO.fail(new RuntimeException(msg))
-                        },
-                        ZIO.succeed(_)
-                      )
+          result   <- currentLeader.either.flatMap {
+                        case Left(_) =>
+                          // Membership changes (add/remove) can leave the cluster
+                          // leaderless for several seconds while peers refresh and
+                          // an election completes — retry like NotLeader.
+                          ZIO.sleep(100.millis) *> loop(transportAttempts, unknownAttempts)
+                        case Right(leader) =>
+                          op(leader, expireAt).foldZIO(
+                            {
+                              case ClientError.NotLeader(_) =>
+                                ZIO.sleep(30.millis) *> loop(0, 0)
+                              case ClientError.Transport(_) if transportAttempts < 40 =>
+                                ZIO.sleep(50.millis) *> loop(transportAttempts + 1, unknownAttempts)
+                              case ClientError.Transport(msg) =>
+                                ZIO.fail(new RuntimeException(s"transport error talking to leader: $msg"))
+                              // Followers learn the leader's random nodeId via
+                              // heartbeats before the alias-refresh fiber maps
+                              // it to a gRPC channel. Wait briefly so refresh
+                              // can catch up, then retry rather than failing
+                              // the caller with a transient routing miss.
+                              case ClientError.UnknownNode(_) if unknownAttempts < 20 =>
+                                ZIO.sleep(100.millis) *> loop(transportAttempts, unknownAttempts + 1)
+                              case ClientError.UnknownNode(target) =>
+                                ZIO.fail(new RuntimeException(s"unknown node id $target"))
+                              case ClientError.Other(msg) =>
+                                ZIO.fail(new RuntimeException(msg))
+                            },
+                            ZIO.succeed(_)
+                          )
+                      }
         } yield result
       loop(0, 0)
     }
