@@ -74,6 +74,11 @@ lazy val `core` = module("dref-core", "dref-core", "Core library")
 
 lazy val example = module("example", "example", "Example app").dependsOn(`core`, raft).settings(noPublishSettings)
 
+lazy val interopExample = module("interop-example", "interop-example", "Interop example")
+  .enablePlugins(JavaAppPackaging)
+  .dependsOn(`core`, raft)
+  .settings(noPublishSettings)
+
 lazy val redis = module("dref-redis", "dref-redis", "Redis backend")
   .dependsOn(`core`, `core` % "test->test")
   .settings(
@@ -90,7 +95,7 @@ lazy val raft = module("dref-raft", "dref-raft", "Raft backend")
     Compile / PB.protoSources := Seq(baseDirectory.value.getParentFile / "proto")
   )
 
-aggregateProjects(`core`, redis, raft, example)
+aggregateProjects(`core`, redis, raft, example, interopExample)
 
 // NativePackager settings
 enablePlugins(UniversalPlugin)

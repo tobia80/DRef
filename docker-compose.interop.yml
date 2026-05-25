@@ -1,0 +1,51 @@
+# Cross-language DRef interop demo: a mixed Scala + Rust Raft cluster.
+#
+# Both services share the `dref-interop` network alias, so each container's
+# `DREF_NODE_SERVICES=dref-interop` resolves to every replica's IP regardless
+# of language. The shared protobuf services + MsgPack codec let Scala and
+# Rust nodes replicate the same Raft log entries and read/write the same
+# `interop-chat-message` DRef.
+#
+# Replica counts are passed by `scripts/interop-cluster.sh` via `--scale`.
+
+services:
+  scala-node:
+    build:
+      context: .
+      dockerfile: docker/interop-scala.Dockerfile
+    image: dref-interop-scala:local
+    environment:
+      DREF_NODE_SERVICES: dref-interop
+      DREF_PORT: "8082"
+      DREF_NODE_LABEL: scala
+    expose:
+      - "8082"
+    stdin_open: true
+    tty: true
+    networks:
+      dref-interop:
+        aliases:
+          - dref-interop
+
+  rust-node:
+    build:
+      context: .
+      dockerfile: docker/interop-rust.Dockerfile
+    image: dref-interop-rust:local
+    environment:
+      DREF_NODE_SERVICES: dref-interop
+      DREF_PORT: "8082"
+      DREF_NODE_LABEL: rust
+      RUST_LOG: "warn,dref_raft=info,interop_node=info"
+    expose:
+      - "8082"
+    stdin_open: true
+    tty: true
+    networks:
+      dref-interop:
+        aliases:
+          - dref-interop
+
+networks:
+  dref-interop:
+    driver: bridge

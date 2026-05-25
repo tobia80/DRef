@@ -1,0 +1,21 @@
+[package]
+name = "interop-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rust Raft node for the cross-language DRef interop demo"
+publish = false
+
+[[bin]]
+name = "interop-node"
+path = "src/main.rs"
+
+[dependencies]
+dref-core = { path = "../dref-core" }
+dref-raft = { path = "../dref-raft" }
+tokio = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
