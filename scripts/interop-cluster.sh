@@ -64,6 +64,25 @@ replica_count() {
   collect_ids "$service" | grep -c . || true
 }
 
+# Compose applies --scale per service independently. If you only pass
+# --scale scala-node=N, rust-node reverts to the compose-file default (1)
+# and extra Rust replicas are removed. Always set both counts together.
+scale_cluster() {
+  local scala_count="$1"
+  local rust_count="$2"
+  if [ "$scala_count" -lt 0 ] || [ "$rust_count" -lt 0 ]; then
+    echo "error: replica counts must be non-negative" >&2
+    return 1
+  fi
+  if [ "$scala_count" -eq 0 ] && [ "$rust_count" -eq 0 ]; then
+    echo "error: cluster must keep at least one node running" >&2
+    return 1
+  fi
+  dc up -d --no-recreate \
+    --scale "scala-node=${scala_count}" \
+    --scale "rust-node=${rust_count}"
+}
+
 resolve_container_name() {
   docker inspect --format '{{.Name}}' "$1" 2>/dev/null | sed 's#^/##'
 }
@@ -155,11 +174,24 @@ cmd_add() {
   fi
   local service
   service="$(service_for_kind "$kind")"
-  local current new
-  current="$(replica_count "$service")"
-  new=$((current + count))
-  echo "==> scaling $service: $current -> $new"
-  dc up -d --no-recreate --scale "${service}=${new}"
+  local scala_count rust_count
+  scala_count="$(replica_count scala-node)"
+  rust_count="$(replica_count rust-node)"
+  local current new_scala new_rust
+  case "$service" in
+    scala-node)
+      current="$scala_count"
+      new_scala=$((scala_count + count))
+      new_rust="$rust_count"
+      ;;
+    rust-node)
+      current="$rust_count"
+      new_scala="$scala_count"
+      new_rust=$((rust_count + count))
+      ;;
+  esac
+  echo "==> scaling $service: $current -> $((current + count)) (scala-node=${new_scala} rust-node=${new_rust})"
+  scale_cluster "$new_scala" "$new_rust"
   echo "==> wait a few seconds for DNS + Raft peer refresh, then check logs:"
   cmd_list
 }
@@ -208,12 +240,11 @@ cmd_remove() {
   docker stop "$target_id" >/dev/null
   docker rm "$target_id" >/dev/null
 
-  local new_count=$(( ${#ids[@]} - 1 ))
-  if [ "$new_count" -lt 0 ]; then
-    new_count=0
-  fi
-  echo "==> reconciling compose scale ${service}=${new_count}"
-  dc up -d --no-recreate --scale "${service}=${new_count}" 2>/dev/null || true
+  local scala_count rust_count
+  scala_count="$(replica_count scala-node)"
+  rust_count="$(replica_count rust-node)"
+  echo "==> reconciling cluster scale (scala-node=${scala_count} rust-node=${rust_count})"
+  scale_cluster "$scala_count" "$rust_count"
   cmd_list
 }
 
