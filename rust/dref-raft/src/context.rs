@@ -145,13 +145,15 @@ impl RaftDRefContext {
         config.bind_address = Some(bind.clone());
         config.node_id = Some(node_id.clone());
 
-        // If the caller didn't include themselves in `initial_endpoints`,
-        // add a self-entry so peer-lookup works correctly.
-        if !config.initial_endpoints.iter().any(|e| e.id == node_id) {
-            config
-                .initial_endpoints
-                .push(NodeEndpoint::new(node_id.clone(), bind.clone()));
-        }
+        // IP-based discovery uses the IP itself as a placeholder endpoint id,
+        // so our own address would otherwise survive into the consensus peer
+        // list (whose self-skip matches on node_id) and inflate the quorum.
+        // Drop any endpoint pointing at our bind, then add ourselves once
+        // under the real node_id.
+        config.initial_endpoints.retain(|e| e.address != bind);
+        config
+            .initial_endpoints
+            .push(NodeEndpoint::new(node_id.clone(), bind.clone()));
 
         let state_machine = StateMachine::new();
         let consensus = Arc::new(Consensus::new(
@@ -221,6 +223,12 @@ impl RaftDRefContext {
             config.connection_timeout,
         );
 
+        // Discover each peer's real nodeId so consensus-layer ids (set via
+        // heartbeat/vote) resolve to a routable address. DNS gave us IP-keyed
+        // placeholders; the `GetEndpoints` RPC returns each peer's memberIds
+        // ending in its own nodeId, so we alias that id onto the same channel.
+        discover_peer_node_aliases(&client, &node_id).await;
+
         // Wait for a leader (best-effort; we don't fail if the cluster is
         // still electing — first request will retry).
         let _ = wait_for_leader(&consensus, leader_wait).await;
@@ -241,14 +249,16 @@ impl RaftDRefContext {
                         Ok(ips) => {
                             let mut endpoints =
                                 ip_provider::node_endpoints_from_ips(&ips, grpc_port);
-                            if !endpoints.iter().any(|e| e.id == node_id) {
-                                endpoints.push(NodeEndpoint::new(node_id.clone(), bind.clone()));
-                            }
+                            endpoints.retain(|e| e.address != bind);
+                            endpoints.push(NodeEndpoint::new(node_id.clone(), bind.clone()));
                             for ep in &endpoints {
                                 client.upsert_endpoint(ep.clone()).await;
                             }
                             *member_ids.write().await =
                                 endpoints.into_iter().map(|e| e.id).collect();
+                            // Refresh nodeId aliases so rolling cluster changes
+                            // (new pods, recycled IPs) stay routable.
+                            discover_peer_node_aliases(&client, &node_id).await;
                         }
                         Err(e) => warn!(error = %e, "address poll failed"),
                     }
@@ -325,6 +335,7 @@ impl RaftDRefContext {
         // retry forever on leader changes, but with a small cap for
         // transport errors so a totally offline cluster fails fast.
         let mut transport_attempts: u32 = 0;
+        let mut unknown_attempts: u32 = 0;
         loop {
             let leader = self.current_leader().await?;
             let client = self.inner.client.clone();
@@ -344,6 +355,21 @@ impl RaftDRefContext {
                         )));
                     }
                     tokio::time::sleep(Duration::from_millis(50)).await;
+                    continue;
+                }
+                Err(ClientError::UnknownNode(target)) => {
+                    // Followers learn the leader's random nodeId via
+                    // heartbeats before the alias-refresh task maps it to a
+                    // gRPC channel. Wait briefly so refresh can catch up,
+                    // then retry rather than failing the caller with a
+                    // transient routing miss.
+                    unknown_attempts += 1;
+                    if unknown_attempts > 20 {
+                        return Err(DRefError::Backend(format!(
+                            "unknown node id {target}"
+                        )));
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
                 }
                 Err(ClientError::Other(msg)) => {
@@ -366,6 +392,32 @@ impl RaftDRefContext {
 
 fn ttl_to_expire_at(ttl: Option<Duration>) -> Option<u64> {
     ttl.map(|d| unix_millis() + d.as_millis() as u64)
+}
+
+/// For every IP-keyed peer in the client map, ask `GetEndpoints` and learn
+/// the peer's real nodeId (the last element of the response, by convention
+/// shared with the Scala side). Aliases that nodeId onto the same address so
+/// consensus-layer ids (leader_id from heartbeats, candidate_id from votes)
+/// route to the right peer. Best-effort: peers that aren't yet serving are
+/// silently skipped and picked up on the next refresh.
+async fn discover_peer_node_aliases(client: &GrpcClient, self_node_id: &str) {
+    let entries = client.entries_snapshot().await;
+    for (id, address) in entries {
+        if id == self_node_id {
+            continue;
+        }
+        match client.get_endpoints(&id).await {
+            Ok(ids) if !ids.is_empty() => {
+                let real_id = ids.last().unwrap().clone();
+                if real_id != id && real_id != self_node_id {
+                    client
+                        .upsert_endpoint(NodeEndpoint::new(real_id, address))
+                        .await;
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 #[async_trait]

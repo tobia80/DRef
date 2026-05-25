@@ -1,6 +1,7 @@
 package io.github.tobia80.dref.raft
 
 import io.github.tobia80.dref.raft.proto.{NodeEndpoint, ProtoRaftConfig, ProtoRaftDRefContext}
+import io.github.tobia80.dref.{DRef, LockStolenException, ManualId}
 import zio.*
 import zio.test.*
 
@@ -42,6 +43,13 @@ object ProtoRaftDRefSpec extends ZIOSpecDefault {
                }
       _     <- waitForSingleLeader(nodes)
     } yield nodes
+
+  private def startSingleNode: ZIO[Scope, Throwable, ProtoRaftDRefContext] =
+    for {
+      port  <- freePort
+      config = makeClusterConfig(List(port), 0, "node-0")
+      ctx   <- ProtoRaftDRefContext.start(config, 500.millis)
+    } yield ctx
 
   private def waitForSingleLeader(nodes: List[ProtoRaftDRefContext]): Task[Unit] =
     ZIO
@@ -103,6 +111,51 @@ object ProtoRaftDRefSpec extends ZIOSpecDefault {
           case _                                                  => false
         }
       )
+    },
+    test("locks serialise concurrent acquires") {
+      for {
+        ctx               <- startSingleNode
+        list              <- Ref.make[List[Int]](Nil)
+        firstLocked       <- Promise.make[Nothing, Unit]
+        fiber             <- ZIO
+                               .foreachParDiscard(List(100, 200)) { id =>
+                                 DRef
+                                   .lockWithContext(ctx, ManualId("proto-lock-serialises")) {
+                                     for {
+                                       _ <- list.update(_ :+ id)
+                                       _ <- firstLocked.succeed(()).when(id == 100)
+                                       _ <- ZIO.sleep(1.second)
+                                     } yield ()
+                                   }
+                                   .delay(id.millis)
+                               }
+                               .fork
+        _                 <- firstLocked.await
+        valueWithOneLock  <- list.get
+        _                 <- fiber.join
+        valueWithTwoLocks <- list.get
+      } yield assertTrue(
+        valueWithOneLock == List(100),
+        valueWithTwoLocks == List(100, 200)
+      )
+    },
+    test("stolen lock surfaces as LockStolenException") {
+      for {
+        ctx            <- startSingleNode
+        _              <- ctx.deleteElement("proto-stolen-lock").ignore
+        lockFiber      <- DRef
+                            .lockWithContext(ctx, ManualId("proto-stolen-lock")) {
+                              ZIO.sleep(5.seconds).as("original-lock-completed")
+                            }
+                            .fork
+        _              <- ZIO.sleep(1.second)
+        _              <- ctx.setElement("proto-stolen-lock", "stolen-value".getBytes, None)
+        originalResult <- lockFiber.join.either
+        originalFailed  = originalResult match {
+                            case Left(_: LockStolenException) => true
+                            case _                            => false
+                          }
+      } yield assertTrue(originalFailed)
     }
   ) @@ TestAspect.withLiveClock @@ TestAspect.sequential
 }

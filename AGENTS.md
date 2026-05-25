@@ -6,15 +6,21 @@
 
 DRef (Distributed Ref) is a library for synchronising state across distributed nodes. It has two implementations:
 
-- **Scala/JVM** (primary, in repo root): built with ZIO, Scala 3.7.3, sbt 1.10.7
+- **Scala/JVM** (primary, in repo root): built with ZIO, Scala 3.8.3, sbt 1.12.0
 - **Rust port** (in `rust/`): built with Tokio, async-trait, tonic (gRPC)
 
 Both expose the same conceptual API with three backends: in-memory, Redis, and Raft.
 
+The Raft backend on both sides is a hand-rolled implementation that speaks the
+shared protobuf services in [`proto/`](proto/) — Scala and Rust nodes can join
+the same Raft cluster. There is no longer a separate Microraft-based engine on
+the Scala side; the single proto engine (`io.github.tobia80.dref.raft.proto`)
+is the only consensus implementation.
+
 ### Required system dependencies
 
 - **JDK 21** (pre-installed on Ubuntu)
-- **sbt 1.10.7** — installed to `/usr/local/share/sbt`; binary linked at `/usr/local/bin/sbt`
+- **sbt 1.12.0** — installed to `/usr/local/share/sbt`; binary linked at `/usr/local/bin/sbt`
 - **Rust stable (1.85+)** — the workspace Cargo.lock pulls crates that require `edition2024`; run `rustup default stable` if the default is outdated
 - **Redis 7+** — required for `dref-redis` integration tests (both Scala and Rust)
 

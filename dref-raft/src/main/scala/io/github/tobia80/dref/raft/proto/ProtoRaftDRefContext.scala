@@ -19,7 +19,10 @@ trait ProtoRaftDRefContext extends DRefContext {
 
 object ProtoRaftDRefContext {
 
-  private final class ProtoDRefClient(clients: Map[String, DRefRaftClient]) {
+  private final class ProtoDRefClient(
+    ipClients: Map[String, DRefRaftClient],
+    aliasRef: Ref[Map[String, DRefRaftClient]]
+  ) {
 
     private def fromStatus(ex: StatusException): ClientError = {
       val desc = Option(ex.getStatus.getDescription).getOrElse("")
@@ -34,9 +37,11 @@ object ProtoRaftDRefContext {
     }
 
     private def call[A](targetId: String)(op: DRefRaftClient => IO[StatusException, A]): IO[ClientError, A] =
-      clients.get(targetId) match {
-        case None        => ZIO.fail(ClientError.Other(s"unknown node id $targetId"))
-        case Some(client) => op(client).mapError(fromStatus)
+      aliasRef.get.flatMap { aliases =>
+        aliases.get(targetId).orElse(ipClients.get(targetId)) match {
+          case None         => ZIO.fail(ClientError.UnknownNode(targetId))
+          case Some(client) => op(client).mapError(fromStatus)
+        }
       }
 
     def setElement(
@@ -87,6 +92,7 @@ object ProtoRaftDRefContext {
   private enum ClientError {
     case NotLeader(leaderId: Option[String])
     case Transport(message: String)
+    case UnknownNode(targetId: String)
     case Other(message: String)
   }
 
@@ -97,8 +103,12 @@ object ProtoRaftDRefContext {
                   case None       => Random.nextLongBetween(0L, 99_999L).map(_.toString)
                 }
       bindAddress = config.bindAddress.getOrElse(s"127.0.0.1:${config.port}")
-      endpoints   = if config.initialEndpoints.exists(_.id == nodeId) then config.initialEndpoints
-                    else config.initialEndpoints :+ NodeEndpoint(nodeId, bindAddress)
+      // IP-based discovery uses the IP itself as a placeholder endpoint id,
+      // so our own address would otherwise stay in the peer list (whose
+      // self-skip matches on nodeId) and inflate the quorum. Drop any
+      // endpoint pointing at our bind, then add ourselves once under nodeId.
+      endpoints   = config.initialEndpoints.filterNot(_.address == bindAddress) :+
+                      NodeEndpoint(nodeId, bindAddress)
       memberIds   = endpoints.map(_.id)
       stateMachine <- ProtoStateMachine.make
       resolvedConfig = config.copy(nodeId = Some(nodeId), initialEndpoints = endpoints)
@@ -114,11 +124,53 @@ object ProtoRaftDRefContext {
                           .scoped(GrpcChannels.managedChannel(ep.address))
                           .map(ep.id -> _)
                       }.map(_.toMap)
-      client        = new ProtoDRefClient(clients)
+      // IP-based discovery keys peers by IP, but consensus identifies them by
+      // real nodeId (heartbeats carry leader_id = randomly-chosen string).
+      // Probe each peer's GetEndpoints — by convention the last entry in the
+      // response is the peer's own nodeId — and alias that id to the same
+      // gRPC client so forwarding writes to the elected leader works.
+      //
+      // Refresh on a schedule: at compose startup peers may not yet be serving
+      // gRPC when we probe them, and one-shot discovery would leave the alias
+      // permanently missing. Periodic refresh also covers rolling restarts
+      // that hand a peer a new random nodeId.
+      aliasRef     <- Ref.make(Map.empty[String, DRefRaftClient])
+      _            <- refreshAliases(clients, nodeId, aliasRef)
+      _            <- refreshAliases(clients, nodeId, aliasRef)
+                        .repeat(Schedule.spaced(1.second))
+                        .forkScoped
+      client         = new ProtoDRefClient(clients, aliasRef)
       _            <- consensus.spawnDrivers
       _            <- ttlReaper(consensus).forkScoped
       _            <- ProtoConsensusEngine.waitForLeader(consensus, leaderWait)
     } yield new Impl(nodeId, resolvedConfig, consensus, stateMachine, client, memberIds)
+
+  private def refreshAliases(
+    ipClients: Map[String, DRefRaftClient],
+    selfNodeId: String,
+    aliasRef: Ref[Map[String, DRefRaftClient]]
+  ): UIO[Unit] =
+    ZIO
+      .foreach(ipClients.toList) { case (id, raftClient) =>
+        if id == selfNodeId then ZIO.succeed(None)
+        else
+          raftClient
+            .getEndpoints(GetEndpointsRequest())
+            .either
+            .map {
+              case Right(resp) if resp.ids.nonEmpty =>
+                val realId = resp.ids.last
+                if realId != id && realId != selfNodeId then Some(realId -> raftClient)
+                else None
+              case _ => None
+            }
+      }
+      .flatMap { pairs =>
+        val discovered = pairs.flatten.toMap
+        // Merge rather than replace so a transient unreachable peer doesn't
+        // drop a previously-learned alias mid-flight.
+        aliasRef.update(_ ++ discovered)
+      }
 
   private final class Impl(
     override val nodeId: String,
@@ -196,25 +248,34 @@ object ProtoRaftDRefContext {
     private def withLeader[A](
       ttl: Option[Duration]
     )(op: (String, Option[Long]) => IO[ClientError, A]): Task[A] = {
-      def loop(transportAttempts: Int): Task[A] =
+      def loop(transportAttempts: Int, unknownAttempts: Int): Task[A] =
         for {
           expireAt <- ttlToExpireAt(ttl)
           leader   <- currentLeader
           result   <- op(leader, expireAt).foldZIO(
                         {
                           case ClientError.NotLeader(_) =>
-                            ZIO.sleep(30.millis) *> loop(0)
-                          case ClientError.Transport(msg) if transportAttempts < 20 =>
-                            ZIO.sleep(50.millis) *> loop(transportAttempts + 1)
+                            ZIO.sleep(30.millis) *> loop(0, 0)
+                          case ClientError.Transport(_) if transportAttempts < 20 =>
+                            ZIO.sleep(50.millis) *> loop(transportAttempts + 1, unknownAttempts)
                           case ClientError.Transport(msg) =>
                             ZIO.fail(new RuntimeException(s"transport error talking to leader: $msg"))
+                          // Followers learn the leader's random nodeId via
+                          // heartbeats before the alias-refresh fiber maps
+                          // it to a gRPC channel. Wait briefly so refresh
+                          // can catch up, then retry rather than failing
+                          // the caller with a transient routing miss.
+                          case ClientError.UnknownNode(_) if unknownAttempts < 20 =>
+                            ZIO.sleep(100.millis) *> loop(transportAttempts, unknownAttempts + 1)
+                          case ClientError.UnknownNode(target) =>
+                            ZIO.fail(new RuntimeException(s"unknown node id $target"))
                           case ClientError.Other(msg) =>
                             ZIO.fail(new RuntimeException(msg))
                         },
                         ZIO.succeed(_)
                       )
         } yield result
-      loop(0)
+      loop(0, 0)
     }
 
     private def ttlToExpireAt(ttl: Option[Duration]): Task[Option[Long]] =

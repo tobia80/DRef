@@ -79,6 +79,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .await?,
     );
 
+    // Non-interactive demo path: when DREF_AUTO_NAME is set, broadcast a
+    // timestamped message every few seconds and log everything observed.
+    // This is what the default compose setup uses so `docker compose logs -f`
+    // shows the cluster working without anyone having to `docker attach`.
+    if let Some(auto_name) = env::var("DREF_AUTO_NAME").ok().filter(|s| !s.trim().is_empty()) {
+        // Suffix the auto-name with a short hostname so each replica is
+        // distinguishable in the chat log — without this, two rust-node
+        // replicas both publish as "rust-auto" and the receiver filter
+        // hides every Rust-to-Rust message.
+        let base = auto_name.trim().to_string();
+        let display_name = match env::var("HOSTNAME").ok().filter(|s| !s.is_empty()) {
+            Some(h) => format!("{base}-{}", h.chars().take(6).collect::<String>()),
+            None => base,
+        };
+        return run_auto_demo(dref, label, display_name).await;
+    }
+
     let mut stdin = BufReader::new(tokio::io::stdin());
 
     print!("\x1b[33m[{label}] enter your display name: \x1b[0m");
@@ -147,4 +164,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     listener.abort();
     println!("[{label}] exiting.");
     Ok(())
+}
+
+async fn run_auto_demo<C>(
+    dref: Arc<DRef<DRefMessage, C>>,
+    label: String,
+    display_name: String,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    C: dref_core::DRefContext + Clone + Send + Sync + 'static,
+{
+    println!(
+        "\x1b[32m[{label}] auto-demo joined as '{display_name}' — broadcasting every 3s.\x1b[0m"
+    );
+
+    // Listener task.
+    {
+        let me = display_name.clone();
+        let dref = Arc::clone(&dref);
+        let label = label.clone();
+        tokio::spawn(async move {
+            let mut stream = Box::pin(dref.change_stream());
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(msg) if !msg.name.is_empty() && msg.name != me => {
+                        println!(
+                            "\x1b[36m<<< ({}) {} [seen by {}]\x1b[0m",
+                            msg.name, msg.message, label
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("change stream error: {e}"),
+                }
+            }
+        });
+    }
+
+    let mut tick = tokio::time::interval(Duration::from_secs(3));
+    loop {
+        tick.tick().await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let message = format!("hello @t={now}");
+        println!("\x1b[34m[{display_name}] >>> {message}\x1b[0m");
+        if let Err(e) = dref
+            .set(DRefMessage {
+                name: display_name.clone(),
+                message,
+            })
+            .await
+        {
+            eprintln!("failed to send message: {e}");
+        }
+    }
 }

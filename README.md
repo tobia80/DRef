@@ -184,14 +184,18 @@ identical, up-to-date metrics without central bottlenecks.
 - **Core API (`dref-core`).** Defines the distributed reference abstraction,
   codecs, locking helpers, and change streams.
 - **Backends.**
-  - `dref-raft`: consensus-backed storage for production clusters.
+  - `dref-raft`: consensus-backed storage for production clusters. Speaks the
+    protobuf services in [`proto/`](proto/), which is the same wire format used
+    by the Rust port — so a Scala Raft cluster can include Rust nodes (and vice
+    versa) with no translation layer.
   - `dref-redis`: integrate with existing Redis deployments.
   - In-memory (`DRefContext.local`): ideal for tests or local development.
 - **Rust port (`rust/`).** A Tokio-based implementation of the same API with
   `dref-core`, `dref-redis`, and `dref-raft` crates. See [`rust/README.md`](rust/README.md)
   for Rust-specific setup and examples.
 - **Examples.** The `example` module contains ready-to-run demos that show how
-  to wire everything together with ZIO layers.
+  to wire everything together with ZIO layers. The `interop-example` module
+  showcases a mixed Scala + Rust Raft cluster.
 
 ## Cross-language compatibility
 

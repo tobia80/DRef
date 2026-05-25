@@ -81,9 +81,14 @@ cmd_logs() {
 pick_container() {
   # Resolve the user's "scala", "rust", or "<n>" argument into a container name.
   local target="$1"
-  local -a scala_ids rust_ids
-  mapfile -t scala_ids < <(dc ps -q scala-node)
-  mapfile -t rust_ids  < <(dc ps -q rust-node)
+  local -a scala_ids=() rust_ids=()
+  # macOS ships Bash 3.2, which has no `mapfile` — read line-by-line instead.
+  while IFS= read -r line; do
+    [ -n "$line" ] && scala_ids+=("$line")
+  done < <(dc ps -q scala-node)
+  while IFS= read -r line; do
+    [ -n "$line" ] && rust_ids+=("$line")
+  done < <(dc ps -q rust-node)
 
   resolve() {
     docker inspect --format '{{.Name}}' "$1" 2>/dev/null | sed 's#^/##'

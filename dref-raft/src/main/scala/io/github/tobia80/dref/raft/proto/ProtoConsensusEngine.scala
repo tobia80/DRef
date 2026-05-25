@@ -38,8 +38,36 @@ final class ProtoConsensusEngine private (
   val stateMachine: ProtoStateMachine,
   peers: Map[String, DRefConsensusClient],
   config: ProtoRaftConfig,
-  stateRef: Ref[ConsensusState]
+  stateRef: Ref[ConsensusState],
+  voterStore: VoterStateStore,
+  persistMutex: Semaphore
 ) {
+
+  /** Run a state mutation and, if it changed `term` or `votedFor`, fsync the
+    * new voter state to disk *before* the caller observes the result.
+    *
+    * Raft safety requires that a node never grants a vote or steps up to a
+    * higher term unless that decision is durable: otherwise a crash-restart
+    * loop can produce two leaders in one term. The semaphore serializes
+    * persist calls so the on-disk record matches the in-memory order of
+    * mutations even under concurrent RPCs.
+    *
+    * If the configured store throws (disk full, IO error) we `orDie` — a
+    * Raft node that can't durably record its vote has no safe forward path
+    * and the process is expected to crash so the orchestrator restarts it.
+    */
+  private def updateAndPersist[A](f: ConsensusState => (A, ConsensusState)): UIO[A] =
+    persistMutex.withPermit {
+      for {
+        before <- stateRef.get
+        result <- stateRef.modify(f)
+        after  <- stateRef.get
+        _      <- ZIO
+                    .when(after.term != before.term || after.votedFor != before.votedFor) {
+                      voterStore.save(VoterState(after.term, after.votedFor)).orDie
+                    }
+      } yield result
+    }
   def role: UIO[Role] = stateRef.get.map(_.role)
 
   def isLeader: UIO[Boolean] = role.map(_ == Role.Leader)
@@ -70,7 +98,7 @@ final class ProtoConsensusEngine private (
     command: Array[Byte]
   ): UIO[(Boolean, Long)] =
     for {
-      updated <- stateRef.modify { st =>
+      updated <- updateAndPersist { st =>
                    if term < st.term then ((false, st.term), st)
                    else
                      val stepped =
@@ -96,7 +124,7 @@ final class ProtoConsensusEngine private (
     } yield result
 
   def handleHeartbeat(leaderId: String, term: Long): UIO[(Boolean, Long)] =
-    stateRef.modify { st =>
+    updateAndPersist { st =>
       if term < st.term then ((false, st.term), st)
       else
         val stepped =
@@ -111,7 +139,7 @@ final class ProtoConsensusEngine private (
     }
 
   def handleVote(candidateId: String, term: Long, lastSeq: Long): UIO[(Boolean, Long)] =
-    stateRef.modify { st =>
+    updateAndPersist { st =>
       if term < st.term then ((false, st.term), st)
       else
         val stepped =
@@ -137,7 +165,7 @@ final class ProtoConsensusEngine private (
     lastSeq: Long
   ): UIO[(Boolean, Long)] =
     for {
-      updated <- stateRef.modify { st =>
+      updated <- updateAndPersist { st =>
                    if term < st.term then ((false, st.term), st)
                    else
                      val stepped =
@@ -159,7 +187,7 @@ final class ProtoConsensusEngine private (
     driverLoop.forever.forkDaemon
 
   private def replicate(term: Long, seq: Long, command: Array[Byte]): UIO[Unit] =
-    ZIO.foreachDiscard(peers) { case (peerId, client) =>
+    ZIO.foreachParDiscard(peers) { case (peerId, client) =>
       client
         .appendEntries(
           AppendEntriesRequest(
@@ -169,8 +197,41 @@ final class ProtoConsensusEngine private (
             seq = seq
           )
         )
-        .catchAll(_ => ZIO.unit)
+        .foldZIO(
+          _ => ZIO.unit,
+          resp =>
+            stepDownIfStale(resp.term) *>
+              // A follower whose lastSeq diverges from ours rejects with
+              // success=false; without a catch-up the strict seq check keeps
+              // refusing every subsequent entry until a new election. Push a
+              // snapshot to bring them in sync as long as we're still the
+              // leader at this term.
+              ZIO.when(!resp.success && resp.term <= term) {
+                sendSnapshotTo(peerId, client)
+              }
+        )
     }
+
+  private def sendSnapshotTo(peerId: String, client: DRefConsensusClient): UIO[Unit] =
+    for {
+      st       <- stateRef.get
+      snapshot <- stateMachine.takeSnapshot
+      _        <- client
+                    .installSnapshot(
+                      InstallSnapshotRequest(
+                        leaderId = nodeId,
+                        term = st.term,
+                        snapshot = Some(snapshot),
+                        lastSeq = st.lastSeq
+                      )
+                    )
+                    .foldZIO(
+                      _ => ZIO.unit,
+                      resp => stepDownIfStale(resp.term)
+                    )
+                    .when(st.role == Role.Leader)
+                    .unit
+    } yield ()
 
   private val driverLoop: UIO[Unit] =
     for {
@@ -195,16 +256,19 @@ final class ProtoConsensusEngine private (
 
   private def sendHeartbeats: UIO[Unit] =
     stateRef.get.flatMap { st =>
-      ZIO.foreachDiscard(peers) { case (peerId, client) =>
+      ZIO.foreachParDiscard(peers) { case (peerId, client) =>
         client
           .heartbeat(HeartbeatRequest(leaderId = nodeId, term = st.term))
-          .catchAll(_ => ZIO.unit)
+          .foldZIO(
+            _ => ZIO.unit,
+            resp => stepDownIfStale(resp.term)
+          )
       }
     }
 
   private def startElection: UIO[Unit] =
     for {
-      election <- stateRef.modify { st =>
+      election <- updateAndPersist { st =>
                     val next = st.copy(
                       role = Role.Candidate,
                       term = st.term + 1,
@@ -227,9 +291,10 @@ final class ProtoConsensusEngine private (
       higherTerm = responses.flatten.collect { case resp if resp.term > term => resp.term }.headOption
       _         <- higherTerm match {
                      case Some(newTerm) =>
-                       stateRef.update { st =>
-                         if newTerm > st.term then st.copy(term = newTerm, role = Role.Follower, votedFor = None)
-                         else st
+                       updateAndPersist { st =>
+                         if newTerm > st.term then
+                           ((), st.copy(term = newTerm, role = Role.Follower, votedFor = None))
+                         else ((), st)
                        }
                      case None          =>
                        val votes = 1 + responses.flatten.count(_.granted)
@@ -252,7 +317,7 @@ final class ProtoConsensusEngine private (
     for {
       st       <- stateRef.get
       snapshot <- stateMachine.takeSnapshot
-      _        <- ZIO.foreachDiscard(peers) { case (peerId, client) =>
+      _        <- ZIO.foreachParDiscard(peers) { case (peerId, client) =>
                     client
                       .installSnapshot(
                         InstallSnapshotRequest(
@@ -262,9 +327,33 @@ final class ProtoConsensusEngine private (
                           lastSeq = st.lastSeq
                         )
                       )
-                      .catchAll(_ => ZIO.unit)
+                      .foldZIO(
+                        _ => ZIO.unit,
+                        resp => stepDownIfStale(resp.term)
+                      )
                   }
     } yield ()
+
+  /** Step down to follower if an outgoing heartbeat / append / snapshot
+    * response carries a term greater than ours. Without this step a stale
+    * leader can stay convinced it is in charge while a follower has sprinted
+    * ahead (e.g. through repeated election timeouts during a partition).
+    */
+  private def stepDownIfStale(observedTerm: Long): UIO[Unit] =
+    updateAndPersist { st =>
+      if observedTerm > st.term then
+        (
+          (),
+          st.copy(
+            term = observedTerm,
+            role = Role.Follower,
+            votedFor = None,
+            leaderId = None,
+            lastHeartbeatNanos = java.lang.System.nanoTime()
+          )
+        )
+      else ((), st)
+    }
 }
 
 object ProtoConsensusEngine {
@@ -279,25 +368,45 @@ object ProtoConsensusEngine {
                          .scoped(GrpcChannels.managedChannel(ep.address))
                          .map(ep.id -> _)
                      }
-      peers          = peerEntries.toMap
-      initialRole    = if peers.isEmpty then Role.Leader else Role.Follower
+      peers      = peerEntries.toMap
+      voterStore <- config.storageDir match {
+                      case Some(path) => VoterStateStore.file(path)
+                      case None       => ZIO.succeed(VoterStateStore.noop)
+                    }
+      loaded     <- voterStore.load
+      // When persistent state already exists, never short-circuit to leader:
+      // doing so would skip the election protocol and the persisted term/vote
+      // would no longer match a fresh leader's claim. Let the standard
+      // election path run and increment the term cleanly.
+      hasPersisted   = loaded.term > 0L || loaded.votedFor.isDefined
+      initialRole    = if peers.isEmpty && !hasPersisted then Role.Leader else Role.Follower
       initialLeader  = if initialRole == Role.Leader then Some(nodeId) else None
-      initialTerm    = if initialRole == Role.Leader then 1L else 0L
+      initialTerm    = if initialRole == Role.Leader then 1L else loaded.term
+      initialVotedFor = if initialRole == Role.Leader then None else loaded.votedFor
       stateRef      <- Ref.make(
                          ConsensusState(
                            role = initialRole,
                            term = initialTerm,
-                           votedFor = None,
+                           votedFor = initialVotedFor,
                            leaderId = initialLeader,
                            lastSeq = 0L,
                            lastHeartbeatNanos = java.lang.System.nanoTime()
                          )
                        )
-    } yield new ProtoConsensusEngine(nodeId, stateMachine, peers, config, stateRef)
+      // If we took the single-node leader shortcut, fsync the bootstrap term
+      // immediately so a crash before the first election still leaves us at
+      // a term we can compare against on restart.
+      _ <- voterStore
+             .save(VoterState(initialTerm, initialVotedFor))
+             .when(initialTerm != loaded.term || initialVotedFor != loaded.votedFor)
+      persistMutex <- Semaphore.make(1)
+    } yield new ProtoConsensusEngine(nodeId, stateMachine, peers, config, stateRef, voterStore, persistMutex)
 
   def waitForLeader(engine: ProtoConsensusEngine, max: Duration): UIO[Option[String]] =
     ZStream
-      .repeatZIOWithSchedule(engine.leaderId, Schedule.spaced(50.millis) && Schedule.upTo(max))
-      .runCollect
-      .map(_.collectFirst { case Some(id) => id })
+      .repeatZIOWithSchedule(engine.leaderId, Schedule.spaced(50.millis))
+      .collect { case Some(id) => id }
+      .runHead
+      .timeout(max)
+      .map(_.flatten)
 }

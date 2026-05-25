@@ -242,6 +242,8 @@ impl Consensus {
             let command = command.clone();
             let leader_id = self.node_id.clone();
             let timeout = self.config.connection_timeout;
+            let state = Arc::clone(&self.state);
+            let this = self.clone();
             tasks.push(tokio::spawn(async move {
                 match peer.client(timeout).await {
                     Ok(mut client) => {
@@ -251,9 +253,25 @@ impl Consensus {
                             command,
                             seq,
                         };
-                        if let Err(e) = client.append_entries(req).await {
-                            debug!(peer = %id, error = ?e, "AppendEntries failed");
-                            peer.reset().await;
+                        match client.append_entries(req).await {
+                            Ok(resp) => {
+                                let resp = resp.into_inner();
+                                step_down_if_stale(&state, resp.term).await;
+                                // A follower whose last_seq diverges from
+                                // ours rejects with success=false; without a
+                                // catch-up the strict seq check keeps
+                                // refusing every subsequent entry until a new
+                                // election. Push a snapshot to bring them in
+                                // sync as long as we're still leader at this
+                                // term.
+                                if !resp.success && resp.term <= term {
+                                    this.send_snapshot_to(&id, &peer).await;
+                                }
+                            }
+                            Err(e) => {
+                                debug!(peer = %id, error = ?e, "AppendEntries failed");
+                                peer.reset().await;
+                            }
                         }
                     }
                     Err(e) => {
@@ -264,6 +282,37 @@ impl Consensus {
         }
         // Don't await; tasks finish on their own.
         drop(tasks);
+    }
+
+    async fn send_snapshot_to(&self, peer_id: &str, peer: &Arc<PeerConn>) {
+        let (term, last_seq, still_leader) = {
+            let st = self.state.read().await;
+            (st.term, st.last_seq, st.role == Role::Leader)
+        };
+        if !still_leader {
+            return;
+        }
+        let snapshot = self.state_machine.take_snapshot().await;
+        match peer.client(self.config.connection_timeout).await {
+            Ok(mut client) => {
+                let req = InstallSnapshotRequest {
+                    leader_id: self.node_id.clone(),
+                    term,
+                    snapshot: Some(snapshot),
+                    last_seq,
+                };
+                match client.install_snapshot(req).await {
+                    Ok(resp) => {
+                        step_down_if_stale(&self.state, resp.into_inner().term).await;
+                    }
+                    Err(e) => {
+                        debug!(peer = %peer_id, error = ?e, "InstallSnapshot catch-up failed");
+                        peer.reset().await;
+                    }
+                }
+            }
+            Err(e) => debug!(peer = %peer_id, error = ?e, "no client for snapshot catch-up"),
+        }
     }
 
     // --- Handlers for inbound RPCs (called by the gRPC server) --------------
@@ -438,6 +487,7 @@ impl Consensus {
             let leader_id = self.node_id.clone();
             let timeout = self.config.connection_timeout;
             let last_seq_for_peer = last_seq;
+            let state = Arc::clone(&self.state);
             tokio::spawn(async move {
                 match peer.client(timeout).await {
                     Ok(mut client) => {
@@ -446,7 +496,9 @@ impl Consensus {
                             term,
                         };
                         match client.heartbeat(req).await {
-                            Ok(_) => {}
+                            Ok(resp) => {
+                                step_down_if_stale(&state, resp.into_inner().term).await;
+                            }
                             Err(e) => {
                                 debug!(peer = %id, error = ?e, "heartbeat failed");
                                 peer.reset().await;
@@ -558,6 +610,7 @@ impl Consensus {
             let leader_id = self.node_id.clone();
             let timeout = self.config.connection_timeout;
             let snapshot = snapshot.clone();
+            let state = Arc::clone(&self.state);
             tokio::spawn(async move {
                 match peer.client(timeout).await {
                     Ok(mut client) => {
@@ -567,15 +620,36 @@ impl Consensus {
                             snapshot: Some(snapshot),
                             last_seq,
                         };
-                        if let Err(e) = client.install_snapshot(req).await {
-                            debug!(peer = %id, error = ?e, "InstallSnapshot failed");
-                            peer.reset().await;
+                        match client.install_snapshot(req).await {
+                            Ok(resp) => {
+                                step_down_if_stale(&state, resp.into_inner().term).await;
+                            }
+                            Err(e) => {
+                                debug!(peer = %id, error = ?e, "InstallSnapshot failed");
+                                peer.reset().await;
+                            }
                         }
                     }
                     Err(e) => debug!(peer = %id, error = ?e, "no client"),
                 }
             });
         }
+    }
+}
+
+/// Step down to follower when an outgoing heartbeat / append / snapshot
+/// response carries a term greater than ours — the follower has sprinted
+/// ahead (likely because of a partition heal) and we are no longer leader.
+/// Without this step, the cluster can deadlock with a stale leader still
+/// believing it is in charge.
+async fn step_down_if_stale(state: &Arc<RwLock<ConsensusState>>, observed_term: u64) {
+    let mut st = state.write().await;
+    if observed_term > st.term {
+        st.term = observed_term;
+        st.role = Role::Follower;
+        st.voted_for = None;
+        st.leader_id = None;
+        st.last_heartbeat = Instant::now();
     }
 }
 
