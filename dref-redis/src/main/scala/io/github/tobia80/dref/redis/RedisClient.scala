@@ -7,8 +7,7 @@ import io.lettuce.core.codec.ByteArrayCodec
 import io.lettuce.core.pubsub.api.reactive.RedisPubSubReactiveCommands
 import reactor.core.publisher.Mono
 import zio.stream.ZStream
-import zio.{Chunk, Scope, Task, ZIO}
-import zio.*
+import zio.{Chunk, Duration, Scope, Task, UIO, ZIO}
 
 import scala.concurrent.duration.FiniteDuration
 
@@ -38,18 +37,17 @@ object RedisClient {
     }
 
   def make(config: RedisConfig): ZIO[Scope, Throwable, RedisClient] =
-    ZIO.acquireRelease(ZIO.attempt(config.toClientResources))(res =>
-      awaitNettyFuture(res.shutdown())
-    ).flatMap { resources =>
-      ZIO.acquireRelease {
-        ZIO.attempt {
-          val client: core.RedisClient = core.RedisClient.create(resources, config.toRedisURI)
-          client.setOptions(config.toOptions)
-          val asyncClient = client.connect(ByteArrayCodec.INSTANCE).async
-          val reactive = client.connectPubSub(ByteArrayCodec.INSTANCE).reactive()
-          LettuceRedisClient(client, asyncClient, reactive)
-        }
-      }(client => client.close().ignore)
+    ZIO.acquireRelease(ZIO.attempt(config.toClientResources))(res => awaitNettyFuture(res.shutdown())).flatMap {
+      resources =>
+        ZIO.acquireRelease {
+          ZIO.attempt {
+            val client: core.RedisClient = core.RedisClient.create(resources, config.toRedisURI)
+            client.setOptions(config.toOptions)
+            val asyncClient = client.connect(ByteArrayCodec.INSTANCE).async
+            val reactive = client.connectPubSub(ByteArrayCodec.INSTANCE).reactive()
+            LettuceRedisClient(client, asyncClient, reactive)
+          }
+        }(client => client.close().ignore)
     }
 }
 
@@ -75,14 +73,15 @@ class LettuceRedisClient(
     ttl match {
       case Some(duration) =>
         val setArgs = SetArgs.Builder.nx.ex(duration.getSeconds)
-        ZIO.fromCompletionStage(async.set(name.toArray, value.toArray, setArgs)).map(res => res != null)
-      case None           => ZIO.fromCompletionStage(async.setnx(name.toArray, value.toArray)).map(res => res.booleanValue())
+        ZIO.fromCompletionStage(async.set(name.toArray, value.toArray, setArgs)).map(_ != null)
+      case None           => ZIO.fromCompletionStage(async.setnx(name.toArray, value.toArray)).map(_.booleanValue())
     }
 
   override def get(name: Chunk[Byte]): Task[Option[Chunk[Byte]]] =
     ZIO.fromCompletionStage(async.get(name.toArray)).map(Option(_).map(Chunk.fromArray))
 
-  override def del(name: Chunk[Byte]): Task[Long] = ZIO.fromCompletionStage(async.del(name.toArray)).map(_.longValue())
+  override def del(name: Chunk[Byte]): Task[Long] =
+    ZIO.fromCompletionStage(async.del(name.toArray)).map(_.longValue())
 
   override def expire(name: Chunk[Byte], ttl: Duration): Task[Boolean] =
     ZIO.fromCompletionStage(async.expire(name.toArray, ttl.toSeconds)).map(_.booleanValue())

@@ -23,15 +23,15 @@ object KubernetesIpProvider {
       .toSet
 
   def live(
-      serviceName: String,
-      namespace: String
+    serviceName: String,
+    namespace: String
   ): ZLayer[Any, Throwable, IpProvider] =
     (k8sDefault >>> Endpointses.live) >>> ZLayer.fromFunction(create(serviceName, namespace, _))
 
   private[raft] def create(
-      serviceName: String,
-      namespace: String,
-      endpointsSvc: Endpointses
+    serviceName: String,
+    namespace: String,
+    endpointsSvc: Endpointses
   ): IpProvider = {
     val k8sNamespace = K8sNamespace(namespace)
     new IpProvider {
@@ -49,13 +49,13 @@ object KubernetesIpProvider {
 
       override def findMyAddress(): Task[String] =
         findNodeAddresses().flatMap { endpointIps =>
-          ZIO.attempt {
-            val myIps = localIps()
-            endpointIps.find(myIps.contains)
-          }.flatMap {
-            case Some(ip) => ZIO.succeed(ip)
-            case None     => ZIO.attempt(InetAddress.getLocalHost.getHostAddress)
-          }
+          ZIO
+            .attemptBlocking(localIps())
+            .flatMap(myIps =>
+              ZIO
+                .fromOption(endpointIps.find(myIps.contains))
+                .orElse(ZIO.attemptBlocking(InetAddress.getLocalHost.getHostAddress))
+            )
         }
 
       override def expectedEndpoints: Task[Int] =
