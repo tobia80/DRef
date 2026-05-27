@@ -136,9 +136,9 @@ impl RaftDRefContext {
             .bind_address
             .clone()
             .unwrap_or_else(|| format!("127.0.0.1:{}", grpc_port));
-        let addr: SocketAddr = bind.parse().map_err(|e| {
-            DRefError::Backend(format!("invalid bind_address '{bind}': {e}"))
-        })?;
+        let addr: SocketAddr = bind
+            .parse()
+            .map_err(|e| DRefError::Backend(format!("invalid bind_address '{bind}': {e}")))?;
 
         // Re-write the config so the consensus / peer-lookup code can see
         // the resolved bind_address and node id.
@@ -156,11 +156,8 @@ impl RaftDRefContext {
             .push(NodeEndpoint::new(node_id.clone(), bind.clone()));
 
         let state_machine = StateMachine::new();
-        let consensus = Arc::new(Consensus::new(
-            node_id.clone(),
-            state_machine.clone(),
-            config.clone(),
-        ));
+        let consensus =
+            Arc::new(Consensus::new(node_id.clone(), state_machine.clone(), config.clone()).await);
 
         // gRPC services. Both share one server.
         let endpoint_ids: Vec<String> = config
@@ -218,10 +215,7 @@ impl RaftDRefContext {
 
         // gRPC client targets every peer + ourselves; forwarding to "self"
         // is just loopback through the gRPC server.
-        let client = GrpcClient::new(
-            config.initial_endpoints.clone(),
-            config.connection_timeout,
-        );
+        let client = GrpcClient::new(config.initial_endpoints.clone(), config.connection_timeout);
 
         // Discover each peer's real nodeId so consensus-layer ids (set via
         // heartbeat/vote) resolve to a routable address. DNS gave us IP-keyed
@@ -366,9 +360,7 @@ impl RaftDRefContext {
                     // transient routing miss.
                     unknown_attempts += 1;
                     if unknown_attempts > 20 {
-                        return Err(DRefError::Backend(format!(
-                            "unknown node id {target}"
-                        )));
+                        return Err(DRefError::Backend(format!("unknown node id {target}")));
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
@@ -438,9 +430,7 @@ impl DRefContext for RaftDRefContext {
         self.with_leader(|client, leader| {
             let name = name.clone();
             let value = value.clone();
-            async move {
-                client.set_element(&leader, &name, value, expire_at).await
-            }
+            async move { client.set_element(&leader, &name, value, expire_at).await }
         })
         .await
     }
@@ -478,10 +468,7 @@ impl DRefContext for RaftDRefContext {
         .await
     }
 
-    fn on_change_stream(
-        &self,
-        name: &str,
-    ) -> BoxStream<'static, Result<ChangeEvent, DRefError>> {
+    fn on_change_stream(&self, name: &str) -> BoxStream<'static, Result<ChangeEvent, DRefError>> {
         // Subscribe to the LOCAL state machine. Followers apply commands
         // too, so a subscriber on any node sees every committed change.
         let rx = self.inner.consensus.state_machine.subscribe();
@@ -492,9 +479,7 @@ impl DRefContext for RaftDRefContext {
                 match item {
                     Ok(ev) if ev.name() == want => Some(Ok(ev)),
                     Ok(_) => None,
-                    Err(e) => Some(Err(DRefError::Backend(format!(
-                        "change stream lag: {e}"
-                    )))),
+                    Err(e) => Some(Err(DRefError::Backend(format!("change stream lag: {e}")))),
                 }
             }
         });
@@ -509,8 +494,7 @@ impl DRefContext for RaftDRefContext {
         // Match Scala's `ttl / 1.25` — refresh well before expiry so a slow
         // round-trip doesn't drop the key.
         let period_nanos = (ttl.as_nanos() * 4) / 5;
-        let period =
-            Duration::from_nanos(period_nanos.min(u64::MAX as u128) as u64);
+        let period = Duration::from_nanos(period_nanos.min(u64::MAX as u128) as u64);
         let this = self.clone();
         let name = name.to_string();
         let ticker = tokio::time::interval(period);
@@ -521,11 +505,7 @@ impl DRefContext for RaftDRefContext {
                 let expire_at = unix_millis() + ttl.as_millis() as u64;
                 this.with_leader(|client, leader| {
                     let name = name.clone();
-                    async move {
-                        client
-                            .expire_element(&leader, &name, expire_at)
-                            .await
-                    }
+                    async move { client.expire_element(&leader, &name, expire_at).await }
                 })
                 .await
             }
@@ -547,9 +527,7 @@ impl DRefContext for RaftDRefContext {
             let name = name.clone();
             async move {
                 match this.get_via_leader(&name).await {
-                    Ok(None) => Some(Ok(ChangeEvent::DeleteElement {
-                        name: name.clone(),
-                    })),
+                    Ok(None) => Some(Ok(ChangeEvent::DeleteElement { name: name.clone() })),
                     Ok(Some(_)) => None,
                     Err(e) => Some(Err(e)),
                 }
@@ -573,12 +551,10 @@ impl DRefContext for RaftDRefContext {
             async move {
                 match this.get_via_leader(&name).await {
                     // Empty OR mismatched value -> stolen.
-                    Ok(None) => Some(Ok(StolenElement {
-                        name: name.clone(),
-                    })),
-                    Ok(Some(current)) if current != value => Some(Ok(StolenElement {
-                        name: name.clone(),
-                    })),
+                    Ok(None) => Some(Ok(StolenElement { name: name.clone() })),
+                    Ok(Some(current)) if current != value => {
+                        Some(Ok(StolenElement { name: name.clone() }))
+                    }
                     Ok(_) => None,
                     Err(e) => Some(Err(e)),
                 }

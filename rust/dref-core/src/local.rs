@@ -164,10 +164,7 @@ impl DRefContext for LocalDRefContext {
         Ok(())
     }
 
-    fn on_change_stream(
-        &self,
-        name: &str,
-    ) -> BoxStream<'static, Result<ChangeEvent, DRefError>> {
+    fn on_change_stream(&self, name: &str) -> BoxStream<'static, Result<ChangeEvent, DRefError>> {
         let rx = self.inner.changes_tx.subscribe();
         let want = name.to_string();
         let s = BroadcastStream::new(rx).filter_map(move |item| {

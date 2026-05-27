@@ -50,8 +50,13 @@ pub struct RaftConfig {
     /// joining nodes can discover the leader.
     pub initial_endpoints: Vec<NodeEndpoint>,
     /// Optional on-disk directory for Raft voter state (`currentTerm` +
-    /// `votedFor`). Without it, vote grants are lost across restarts.
+    /// `votedFor`) AND state-machine snapshots. Without it, vote grants and
+    /// applied state are lost across restarts.
     pub storage_dir: Option<PathBuf>,
+    /// Take a state-machine snapshot after every N applied commands. Only
+    /// effective when `storage_dir` is set. `0` disables automatic snapshots
+    /// (the engine still snapshots on InstallSnapshot reception).
+    pub snapshot_every: u32,
 }
 
 impl Default for RaftConfig {
@@ -67,6 +72,7 @@ impl Default for RaftConfig {
             heartbeat_interval: Duration::from_millis(300),
             initial_endpoints: Vec::new(),
             storage_dir: None,
+            snapshot_every: 1000,
         }
     }
 }

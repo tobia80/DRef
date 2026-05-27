@@ -8,12 +8,13 @@
 pub mod config;
 pub mod consensus;
 pub mod context;
-pub mod voter_state_store;
 pub mod grpc_client;
 pub mod grpc_server;
 pub mod ip_provider;
 pub mod state_command;
 pub mod state_machine;
+pub mod state_machine_snapshot_store;
+pub mod voter_state_store;
 
 /// Generated protobuf modules.
 pub mod proto {
@@ -37,9 +38,15 @@ pub mod proto {
 pub use config::{NodeEndpoint, RaftConfig};
 pub use context::RaftDRefContext;
 pub use ip_provider::{
-    DnsIpProvider, IpProvider, IpProviderError, KubernetesIpProvider, LocalIpProvider,
-    StaticIpProvider, extract_endpoint_ips, from_env, node_endpoints_from_ips, port_from_env,
+    extract_endpoint_ips, from_env, node_endpoints_from_ips, port_from_env, DnsIpProvider,
+    IpProvider, IpProviderError, KubernetesIpProvider, LocalIpProvider, StaticIpProvider,
 };
 pub use state_command::StateCommand;
 pub use state_machine::ExpiringValue;
-pub use voter_state_store::{FileVoterStateStore, NoopVoterStateStore, VoterState, VoterStateStore};
+pub use state_machine_snapshot_store::{
+    FileStateMachineSnapshotStore, NoopStateMachineSnapshotStore, SnapshotError,
+    StateMachineSnapshotStore,
+};
+pub use voter_state_store::{
+    FileVoterStateStore, NoopVoterStateStore, VoterState, VoterStateStore,
+};

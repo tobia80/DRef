@@ -45,7 +45,11 @@ pub struct RedisConfig {
 
 impl RedisConfig {
     fn to_url(&self) -> String {
-        let scheme = if self.ca_cert.is_some() { "rediss" } else { "redis" };
+        let scheme = if self.ca_cert.is_some() {
+            "rediss"
+        } else {
+            "redis"
+        };
         let auth = match (self.username.as_deref(), self.password.as_deref()) {
             (Some(u), Some(p)) => format!("{u}:{p}@"),
             (None, Some(p)) => format!(":{p}@"),
@@ -72,10 +76,18 @@ struct ChangePayload {
 
 impl ChangePayload {
     fn set(name: &str, value: Vec<u8>) -> Self {
-        Self { name: name.as_bytes().to_vec(), value, delete: false }
+        Self {
+            name: name.as_bytes().to_vec(),
+            value,
+            delete: false,
+        }
     }
     fn delete(name: &str) -> Self {
-        Self { name: name.as_bytes().to_vec(), value: Vec::new(), delete: true }
+        Self {
+            name: name.as_bytes().to_vec(),
+            value: Vec::new(),
+            delete: true,
+        }
     }
     fn name_string(&self) -> Option<String> {
         String::from_utf8(self.name.clone()).ok()
@@ -125,7 +137,9 @@ impl RedisDRefContext {
     pub async fn new(config: RedisConfig) -> Result<Self, DRefError> {
         let url = config.to_url();
         let client = Client::open(url.clone()).map_err(redis_err)?;
-        let conn = ConnectionManager::new(client.clone()).await.map_err(redis_err)?;
+        let conn = ConnectionManager::new(client.clone())
+            .await
+            .map_err(redis_err)?;
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
         let tx_for_task = tx.clone();
         let listener = tokio::spawn(async move {
@@ -183,10 +197,7 @@ impl DRefContext for RedisDRefContext {
                         .map_err(redis_err)?;
                 }
                 None => {
-                    let _: () = conn
-                        .set(name, value.clone())
-                        .await
-                        .map_err(redis_err)?;
+                    let _: () = conn.set(name, value.clone()).await.map_err(redis_err)?;
                 }
             }
         }
@@ -231,10 +242,7 @@ impl DRefContext for RedisDRefContext {
         self.publish(&ChangePayload::delete(name)).await
     }
 
-    fn on_change_stream(
-        &self,
-        name: &str,
-    ) -> BoxStream<'static, Result<ChangeEvent, DRefError>> {
+    fn on_change_stream(&self, name: &str) -> BoxStream<'static, Result<ChangeEvent, DRefError>> {
         let rx = self.inner.changes_tx.subscribe();
         let want = name.to_string();
         let s = BroadcastStream::new(rx).filter_map(move |item| {
@@ -245,13 +253,14 @@ impl DRefContext for RedisDRefContext {
                         Some(n) if n == want => Some(Ok(if p.delete {
                             ChangeEvent::DeleteElement { name: n }
                         } else {
-                            ChangeEvent::SetElement { name: n, value: p.value }
+                            ChangeEvent::SetElement {
+                                name: n,
+                                value: p.value,
+                            }
                         })),
                         _ => None,
                     },
-                    Err(e) => {
-                        Some(Err(DRefError::Backend(format!("change stream lag: {e}"))))
-                    }
+                    Err(e) => Some(Err(DRefError::Backend(format!("change stream lag: {e}")))),
                 }
             }
         });

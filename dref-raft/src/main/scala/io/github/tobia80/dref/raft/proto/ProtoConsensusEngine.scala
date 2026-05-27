@@ -43,7 +43,10 @@ final class ProtoConsensusEngine private (
   config: ProtoRaftConfig,
   stateRef: Ref[ConsensusState],
   voterStore: VoterStateStore,
-  persistMutex: Semaphore
+  persistMutex: Semaphore,
+  snapshotStore: StateMachineSnapshotStore,
+  snapshotMutex: Semaphore,
+  appliesSinceSnapshot: Ref[Long]
 ) {
 
   /** Align consensus replication peers with the current discovery snapshot. */
@@ -88,6 +91,43 @@ final class ProtoConsensusEngine private (
                     }
       } yield result
     }
+
+  /** Record that a command was successfully applied. When the running tally crosses the configured
+    * `snapshotEvery` threshold, fork off a snapshot write so the on-disk picture catches up.
+    *
+    * The write is forked rather than awaited: snapshotting is a *durability* optimisation, not a correctness
+    * requirement, so a slow disk must not stretch out replication latency. If the write fails we log and reset the
+    * counter anyway — retrying in a tight loop would just amplify the underlying disk problem.
+    */
+  private def noteApplied: UIO[Unit] =
+    if config.snapshotEvery <= 0 then ZIO.unit
+    else
+      appliesSinceSnapshot.modify { n =>
+        val next = n + 1L
+        if next >= config.snapshotEvery.toLong then (true, 0L) else (false, next)
+      }.flatMap { shouldSnapshot =>
+        ZIO.when(shouldSnapshot)(persistSnapshotInBackground).unit
+      }
+
+  private def persistSnapshotInBackground: UIO[Unit] =
+    persistSnapshotNow.catchAll { t =>
+      ZIO.logWarningCause(s"state-machine snapshot save failed on node $nodeId", Cause.fail(t))
+    }.forkDaemon.unit
+
+  /** Take a snapshot of the state machine and fsync it to disk. Serialised so concurrent triggers don't both write —
+    * the second waits for the first, then takes a fresh snapshot itself.
+    */
+  private def persistSnapshotNow: Task[Unit] =
+    snapshotMutex.withPermit {
+      for {
+        st       <- stateRef.get
+        snapshot <- stateMachine.takeSnapshot
+        _        <- snapshotStore.save(snapshot.copy(lastSeq = st.lastSeq))
+      } yield ()
+    }
+
+  /** Force a snapshot persist now. Exposed for tests and graceful shutdown. */
+  def takeAndPersistSnapshot: Task[Unit] = persistSnapshotNow
   def role: UIO[Role] = stateRef.get.map(_.role)
 
   def isLeader: UIO[Boolean] = role.map(_ == Role.Leader)
@@ -115,6 +155,7 @@ final class ProtoConsensusEngine private (
       (term, seq) = termAndSeq
       bytes       = cmd.toByteArray
       result     <- stateMachine.apply(cmd)
+      _          <- noteApplied
       _          <- replicate(term, seq, bytes).forkDaemon.unit
     } yield result
 
@@ -145,7 +186,10 @@ final class ProtoConsensusEngine private (
           ZIO
             .attempt(StateCommand.parseFrom(command))
             .flatMap(stateMachine.apply)
-            .fold(_ => false, _ => true)
+            .foldZIO(
+              _ => ZIO.succeed(false),
+              _ => noteApplied.as(true)
+            )
             .map(ok => (ok, currentTerm))
         else ZIO.succeed((false, currentTerm))
     } yield result
@@ -239,7 +283,16 @@ final class ProtoConsensusEngine private (
                                     ((true, next.term), next)
                                 }
       (accepted, currentTerm) = updated
-      _                      <- stateMachine.installSnapshot(snapshot).when(accepted)
+      _                      <- ZIO
+                                  .when(accepted) {
+                                    // Installing a snapshot replaces the whole state machine. Reset the
+                                    // applies-counter and durably re-write the snapshot so a restart picks up the
+                                    // freshly-received state instead of the leader's stale `lastSeq` gap.
+                                    val durableSnapshot = snapshot.copy(lastSeq = lastSeq)
+                                    stateMachine.installSnapshot(durableSnapshot) *>
+                                      appliesSinceSnapshot.set(0L) *>
+                                      persistSnapshotInBackground
+                                  }
     } yield (accepted, currentTerm)
 
   def spawnDrivers: UIO[Fiber.Runtime[Throwable, Nothing]] =
@@ -483,6 +536,16 @@ object ProtoConsensusEngine {
                           case Some(path) => VoterStateStore.file(path)
                           case None       => ZIO.succeed(VoterStateStore.noop)
                         }
+      snapshotStore  <- config.storageDir match {
+                          case Some(path) => StateMachineSnapshotStore.file(path)
+                          case None       => ZIO.succeed(StateMachineSnapshotStore.noop)
+                        }
+      // Hydrate the state machine BEFORE peers come online so we don't serve
+      // empty reads or accept appends against a stale lastSeq baseline. If the
+      // snapshot file is corrupt or unreadable we fail-fast — silently booting
+      // empty would diverge this node from the rest of the cluster.
+      persisted      <- snapshotStore.load
+      _              <- ZIO.foreachDiscard(persisted)(stateMachine.installSnapshot)
       loaded         <- voterStore.load
       // When persistent state already exists, never short-circuit to leader:
       // doing so would skip the election protocol and the persisted term/vote
@@ -499,7 +562,7 @@ object ProtoConsensusEngine {
                             term = initialTerm,
                             votedFor = initialVotedFor,
                             leaderId = initialLeader,
-                            lastSeq = 0L,
+                            lastSeq = persisted.fold(0L)(_.lastSeq),
                             lastHeartbeatNanos = java.lang.System.nanoTime()
                           )
                         )
@@ -510,8 +573,21 @@ object ProtoConsensusEngine {
                           .save(VoterState(initialTerm, initialVotedFor))
                           .when(initialTerm != loaded.term || initialVotedFor != loaded.votedFor)
       persistMutex   <- Semaphore.make(1)
+      snapshotMutex  <- Semaphore.make(1)
+      appliesRef     <- Ref.make(0L)
       peersRef       <- Ref.make(peers)
-    } yield new ProtoConsensusEngine(nodeId, stateMachine, peersRef, config, stateRef, voterStore, persistMutex)
+    } yield new ProtoConsensusEngine(
+      nodeId,
+      stateMachine,
+      peersRef,
+      config,
+      stateRef,
+      voterStore,
+      persistMutex,
+      snapshotStore,
+      snapshotMutex,
+      appliesRef
+    )
 
   def waitForLeader(engine: ProtoConsensusEngine, max: Duration): UIO[Option[String]] =
     ZStream

@@ -12,10 +12,7 @@ fn hex(bytes: &[u8]) -> String {
 fn state_command_set_element_matches_golden_bytes() {
     let cmd = StateCommand::set_element("my-key", vec![1, 2, 3], Some(1_700_000_000));
     let encoded = state_command::encode(&cmd).expect("encode");
-    assert_eq!(
-        hex(&encoded),
-        "0a130a066d792d6b657912030102031880e2cfaa06"
-    );
+    assert_eq!(hex(&encoded), "0a130a066d792d6b657912030102031880e2cfaa06");
 }
 
 #[test]
@@ -33,9 +30,13 @@ fn cluster_snapshot_single_entry_matches_golden_bytes() {
             value: vec![0x68, 0x69],
             expire_at: Some(1_700_000_000),
         }],
+        last_seq: 0,
     };
     let encoded = prost::Message::encode_to_vec(&snapshot);
-    assert_eq!(hex(&encoded), "0a160a0a7368617265642d6b6579120268691880e2cfaa06");
+    assert_eq!(
+        hex(&encoded),
+        "0a160a0a7368617265642d6b6579120268691880e2cfaa06"
+    );
 }
 
 #[test]

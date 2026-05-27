@@ -100,10 +100,7 @@ impl GrpcClient {
     }
 
     /// Build (or fetch cached) gRPC client for a given node id.
-    async fn client_for(
-        &self,
-        target_id: &str,
-    ) -> Result<DRefRaftClient<Channel>, ClientError> {
+    async fn client_for(&self, target_id: &str) -> Result<DRefRaftClient<Channel>, ClientError> {
         let mut guard = self.inner.lock().await;
         let entry = guard
             .get_mut(target_id)
@@ -111,13 +108,11 @@ impl GrpcClient {
         if let Some(c) = entry.client.as_ref() {
             return Ok(c.clone());
         }
-        let endpoint = tonic::transport::Endpoint::from_shared(format!(
-            "http://{}",
-            entry.endpoint.address
-        ))
-        .map_err(|e| ClientError::Transport(format!("bad address: {e}")))?
-        .connect_timeout(self.timeout)
-        .timeout(self.timeout);
+        let endpoint =
+            tonic::transport::Endpoint::from_shared(format!("http://{}", entry.endpoint.address))
+                .map_err(|e| ClientError::Transport(format!("bad address: {e}")))?
+                .connect_timeout(self.timeout)
+                .timeout(self.timeout);
         let chan = endpoint.connect_lazy();
         let c = DRefRaftClient::new(chan);
         entry.client = Some(c.clone());

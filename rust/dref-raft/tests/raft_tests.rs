@@ -42,6 +42,7 @@ fn make_cluster_config(ports: &[u16], idx: usize) -> RaftConfig {
         heartbeat_interval: Duration::from_millis(80),
         initial_endpoints: endpoints,
         storage_dir: None,
+        snapshot_every: 1000,
     }
 }
 
@@ -58,10 +59,9 @@ async fn start_cluster(size: usize) -> Vec<RaftDRefContext> {
     // Wait for a leader to settle.
     for _ in 0..40 {
         sleep(Duration::from_millis(100)).await;
-        let leaders: Vec<_> = futures::future::join_all(
-            nodes.iter().map(|n| async move { n.is_leader().await }),
-        )
-        .await;
+        let leaders: Vec<_> =
+            futures::future::join_all(nodes.iter().map(|n| async move { n.is_leader().await }))
+                .await;
         if leaders.iter().filter(|x| **x).count() == 1 {
             break;
         }
@@ -189,9 +189,7 @@ async fn on_change_stream_observes_writes_locally() -> Result<(), DRefError> {
 
     // Brief delay so the subscriber is in place before the write.
     sleep(Duration::from_millis(50)).await;
-    writer
-        .set_element(key, b"observed".to_vec(), None)
-        .await?;
+    writer.set_element(key, b"observed".to_vec(), None).await?;
 
     let got = tokio::time::timeout(Duration::from_secs(3), recv)
         .await
@@ -280,10 +278,8 @@ async fn restart_one_node_cluster_stays_stable_term_does_not_spike() {
     // Persistent storage so the restarted node remembers (term, votedFor).
     let dirs: Vec<std::path::PathBuf> = (0..3)
         .map(|i| {
-            let d = std::env::temp_dir().join(format!(
-                "dref-prevote-restart-{}-{i}",
-                std::process::id()
-            ));
+            let d = std::env::temp_dir()
+                .join(format!("dref-prevote-restart-{}-{i}", std::process::id()));
             let _ = std::fs::remove_dir_all(&d);
             std::fs::create_dir_all(&d).unwrap();
             d
@@ -385,11 +381,10 @@ async fn restart_one_node_cluster_stays_stable_term_does_not_spike() {
 #[tokio::test]
 async fn dref_make_and_set_roundtrip() -> Result<(), DRefError> {
     let nodes = start_cluster(2).await;
-    let aref =
-        DRef::<String, _>::make_with_name(&nodes[0], "dref-raft-test:roundtrip", || {
-            "init".to_string()
-        })
-        .await?;
+    let aref = DRef::<String, _>::make_with_name(&nodes[0], "dref-raft-test:roundtrip", || {
+        "init".to_string()
+    })
+    .await?;
     aref.set("hello".to_string()).await?;
     let v = aref.get().await?;
     assert_eq!(v, "hello");

@@ -31,22 +31,25 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rand::RngExt;
-use tokio::sync::{Mutex, RwLock};
 use std::sync::Arc as StdArc;
+use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Instant};
 use tracing::{debug, info, warn};
 
 use crate::config::{NodeEndpoint, RaftConfig};
 use crate::proto::dref_consensus::d_ref_consensus_client::DRefConsensusClient;
-use crate::voter_state_store::{
-    FileVoterStateStore, NoopVoterStateStore, VoterState, VoterStateStore,
-};
 use crate::proto::dref_consensus::{
     AppendEntriesRequest, ClusterSnapshot, HeartbeatRequest, InstallSnapshotRequest,
     PreVoteRequest, VoteRequest,
 };
 use crate::state_command::{self, StateCommand};
 use crate::state_machine::{ApplyResult, StateMachine};
+use crate::state_machine_snapshot_store::{
+    FileStateMachineSnapshotStore, NoopStateMachineSnapshotStore, StateMachineSnapshotStore,
+};
+use crate::voter_state_store::{
+    FileVoterStateStore, NoopVoterStateStore, VoterState, VoterStateStore,
+};
 use tonic::transport::Channel;
 
 /// Role each node plays in the cluster at any given moment.
@@ -87,21 +90,16 @@ impl PeerConn {
         }
     }
 
-    async fn client(
-        &self,
-        timeout: Duration,
-    ) -> Result<DRefConsensusClient<Channel>, String> {
+    async fn client(&self, timeout: Duration) -> Result<DRefConsensusClient<Channel>, String> {
         let mut slot = self.client.lock().await;
         if let Some(c) = slot.as_ref() {
             return Ok(c.clone());
         }
-        let endpoint = tonic::transport::Endpoint::from_shared(format!(
-            "http://{}",
-            self.endpoint.address
-        ))
-        .map_err(|e| format!("invalid peer address '{}': {e}", self.endpoint.address))?
-        .connect_timeout(timeout)
-        .timeout(timeout);
+        let endpoint =
+            tonic::transport::Endpoint::from_shared(format!("http://{}", self.endpoint.address))
+                .map_err(|e| format!("invalid peer address '{}': {e}", self.endpoint.address))?
+                .connect_timeout(timeout)
+                .timeout(timeout);
         // Lazy connect avoids blocking startup on peers that aren't up yet.
         let chan = endpoint.connect_lazy();
         let client = DRefConsensusClient::new(chan);
@@ -142,21 +140,38 @@ pub struct Consensus {
     config: RaftConfig,
     voter_store: StdArc<dyn VoterStateStore>,
     persist_mutex: Arc<Mutex<()>>,
+    snapshot_store: StdArc<dyn StateMachineSnapshotStore>,
+    snapshot_mutex: Arc<Mutex<()>>,
+    applies_since_snapshot: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Consensus {
     /// Build a new consensus node. Peers must NOT include `self`.
-    pub fn new(node_id: String, state_machine: StateMachine, config: RaftConfig) -> Self {
+    ///
+    /// Async because the state machine is rehydrated from any on-disk snapshot before peers come
+    /// online — we don't want to serve empty reads or accept appends with a stale `last_seq`
+    /// baseline while we wait for the leader to ship a fresh snapshot.
+    pub async fn new(node_id: String, state_machine: StateMachine, config: RaftConfig) -> Self {
         let voter_store: StdArc<dyn VoterStateStore> = match &config.storage_dir {
             Some(dir) => StdArc::new(
-                FileVoterStateStore::open(dir)
-                    .expect("create voter-state storage directory"),
+                FileVoterStateStore::open(dir).expect("create voter-state storage directory"),
             ),
             None => StdArc::new(NoopVoterStateStore),
         };
-        let loaded = voter_store
+        let snapshot_store: StdArc<dyn StateMachineSnapshotStore> = match &config.storage_dir {
+            Some(dir) => StdArc::new(
+                FileStateMachineSnapshotStore::open(dir)
+                    .expect("create state-machine snapshot storage directory"),
+            ),
+            None => StdArc::new(NoopStateMachineSnapshotStore),
+        };
+        let persisted = snapshot_store
             .load()
-            .expect("load persisted voter state");
+            .expect("load persisted state-machine snapshot");
+        if let Some(snapshot) = persisted.clone() {
+            state_machine.install_snapshot(snapshot).await;
+        }
+        let loaded = voter_store.load().expect("load persisted voter state");
         let mut peers = HashMap::new();
         for ep in &config.initial_endpoints {
             if ep.id != node_id {
@@ -203,12 +218,15 @@ impl Consensus {
                 term: initial_term,
                 voted_for: initial_voted_for,
                 leader_id,
-                last_seq: 0,
+                last_seq: persisted.as_ref().map(|s| s.last_seq).unwrap_or(0),
                 last_heartbeat: Instant::now(),
             })),
             config,
             voter_store,
             persist_mutex: Arc::new(Mutex::new(())),
+            snapshot_store,
+            snapshot_mutex: Arc::new(Mutex::new(())),
+            applies_since_snapshot: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -256,6 +274,49 @@ impl Consensus {
                 .expect("persist voter state");
         }
         result
+    }
+
+    /// Record that a command was successfully applied. When the running tally crosses the
+    /// configured `snapshot_every` threshold, spawn a background task that fsyncs a snapshot to
+    /// disk. The write is spawned rather than awaited: snapshotting is a *durability*
+    /// optimisation, so slow disk must not stretch replication latency.
+    async fn note_applied(&self) {
+        if self.config.snapshot_every == 0 {
+            return;
+        }
+        let threshold = self.config.snapshot_every as u64;
+        let next = self
+            .applies_since_snapshot
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        if next >= threshold {
+            // Reset by subtracting `next` so concurrent increments are accounted for.
+            self.applies_since_snapshot
+                .fetch_sub(next, std::sync::atomic::Ordering::Relaxed);
+            let this = self.clone();
+            tokio::spawn(async move {
+                if let Err(e) = this.persist_snapshot_now().await {
+                    warn!(error = ?e, "state-machine snapshot save failed");
+                }
+            });
+        }
+    }
+
+    /// Take a snapshot of the state machine and fsync it to disk. Serialised so concurrent
+    /// triggers don't both write — the second waits, then takes a fresh snapshot itself.
+    async fn persist_snapshot_now(&self) -> Result<(), String> {
+        let _guard = self.snapshot_mutex.lock().await;
+        let last_seq = self.state.read().await.last_seq;
+        let mut snapshot = self.state_machine.take_snapshot().await;
+        snapshot.last_seq = last_seq;
+        self.snapshot_store
+            .save(&snapshot)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Force a snapshot persist now. Exposed for tests and graceful shutdown.
+    pub async fn take_and_persist_snapshot(&self) -> Result<(), String> {
+        self.persist_snapshot_now().await
     }
 
     /// Exposed for integration tests that assert stale-leader demotion.
@@ -334,9 +395,10 @@ impl Consensus {
             (st.term, st.last_seq)
         };
 
-        let bytes = state_command::encode(&cmd)
-            .map_err(|e| ConsensusError::Serialize(e.to_string()))?;
+        let bytes =
+            state_command::encode(&cmd).map_err(|e| ConsensusError::Serialize(e.to_string()))?;
         let result = self.state_machine.apply(cmd).await;
+        self.note_applied().await;
 
         // Fire-and-forget replication. Followers can fall behind; the
         // periodic snapshot-install during reconnection brings them back.
@@ -472,6 +534,7 @@ impl Consensus {
         match state_command::decode(&command) {
             Ok(cmd) => {
                 self.state_machine.apply(cmd).await;
+                self.note_applied().await;
                 (true, current_term)
             }
             Err(e) => {
@@ -550,12 +613,7 @@ impl Consensus {
     /// in this term and the candidate's seq is at least as up-to-date as
     /// ours. (Real Raft compares (term, index); we conflate index into our
     /// monotonic seq.)
-    pub async fn handle_vote(
-        &self,
-        candidate_id: String,
-        term: u64,
-        last_seq: u64,
-    ) -> (bool, u64) {
+    pub async fn handle_vote(&self, candidate_id: String, term: u64, last_seq: u64) -> (bool, u64) {
         self.update_and_persist(|mut st| {
             if term < st.term {
                 return ((false, st.term), st);
@@ -607,7 +665,22 @@ impl Consensus {
             .await;
 
         if accepted {
-            self.state_machine.install_snapshot(snapshot).await;
+            // Installing a snapshot replaces the whole state machine. Reset the applies-counter
+            // and durably re-write the snapshot so a restart picks up the freshly-received state
+            // rather than the leader's stale `last_seq` gap.
+            let mut durable_snapshot = snapshot;
+            durable_snapshot.last_seq = last_seq;
+            self.state_machine
+                .install_snapshot(durable_snapshot.clone())
+                .await;
+            self.applies_since_snapshot
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            let this = self.clone();
+            tokio::spawn(async move {
+                if let Err(e) = this.persist_snapshot_now().await {
+                    warn!(error = ?e, "state-machine snapshot save (post-install) failed");
+                }
+            });
         }
         (accepted, current_term)
     }

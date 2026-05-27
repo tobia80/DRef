@@ -29,7 +29,7 @@ custom replication logic, retry loops, or bespoke consensus code.
 - **Backend flexibility.** Switch between Raft, Redis, or in-memory
   implementations to match the deployment environment.
 - **Cross-language binary compatibility.** Scala and Rust nodes can share the
-  same Redis keys, Raft log entries, and gRPC services when using the default
+  same Redis keys, Raft state-command payloads, and gRPC services when using the default
   MsgPack codec and shared protobuf definitions (see
   [Cross-language compatibility](#cross-language-compatibility)).
 - **Codec agnostic.** Bring your own codecs (e.g. Desert or MsgPack) on the
@@ -197,6 +197,51 @@ identical, up-to-date metrics without central bottlenecks.
   to wire everything together with ZIO layers. The `interop-example` module
   showcases a mixed Scala + Rust Raft cluster.
 
+## Raft safety & durability
+
+DRef's Raft backend persists `(currentTerm, votedFor)` to disk before
+acknowledging any vote, append, or heartbeat — so a restarted node cannot vote
+twice in the same term. It also snapshots the state machine to the same storage
+directory and restores both the key/value contents and the last applied
+consensus sequence on restart.
+
+DRef is restart-safe as long as each node is configured with a stable
+`storageDir`.
+
+```scala
+ProtoRaftConfig(
+  port = 8082,
+  // Required for any multi-node cluster that needs to survive restarts.
+  // Point this at a stable per-node volume (PersistentVolumeClaim on K8s).
+  storageDir = Some(java.nio.file.Paths.get("/var/lib/dref/node-1")),
+  // Persist a state-machine snapshot after every N applied commands.
+  // Set to 0 to disable automatic snapshots.
+  snapshotEvery = 1000,
+  // ...
+)
+```
+
+If `storageDir` is `None` (the default), the node keeps voter state and
+snapshots in memory only. That is fine for single-process tests but unsafe for
+multi-node clusters: a node that restarts without persistent `votedFor` can
+grant a second vote in the same term, and a node that restarts without a
+snapshot must be reseeded by the leader. Deploy multi-node Raft clusters with a
+per-node PersistentVolumeClaim (or equivalent) rather than a plain `Deployment`.
+
+Snapshots are full state-machine images, not durable Raft log segments. The
+current consensus engine uses monotonic sequence numbers and `InstallSnapshot`
+catch-up instead of maintaining a persistent command log, so there is no log to
+truncate. This keeps restart and lagging-follower recovery bounded in the
+current simplified model, but it is not a full Raft §7 log-compaction
+implementation.
+
+The on-disk voter-state format is shared with the Rust port (magic `DRFT`,
+big-endian fields, atomic rename + `fsync` on every write); see
+[`compat/voter_state_vectors.json`](compat/voter_state_vectors.json). The
+state-machine snapshot format is shared as well (magic `DRFS`, protobuf
+`ClusterSnapshot`, atomic rename + `fsync`); see
+[`compat/snapshot_vectors.json`](compat/snapshot_vectors.json).
+
 ## Cross-language compatibility
 
 DRef is implemented in both **Scala (ZIO)** and **Rust (Tokio)**. Mixed clusters
@@ -206,7 +251,8 @@ layer or sidecar is required.
 | Layer | Shared contract | Verification |
 | --- | --- | --- |
 | **Core values & locks** | MsgPack codec (`rmp-serde` / `zio-schema-msg-pack`), 8-byte big-endian lock tokens | [`compat/vectors.json`](compat/vectors.json), `CrossLangCompatSpec` (Scala), `compat_tests` (Rust) |
-| **Raft log entries** | [`proto/state_command.proto`](proto/state_command.proto) | [`compat/consensus_vectors.json`](compat/consensus_vectors.json), `CrossLangConsensusCompatSpec` (Scala), `consensus_compat_tests` (Rust) |
+| **Raft state commands** | [`proto/state_command.proto`](proto/state_command.proto) | [`compat/consensus_vectors.json`](compat/consensus_vectors.json), `CrossLangConsensusCompatSpec` (Scala), `consensus_compat_tests` (Rust) |
+| **Raft snapshots** | `ClusterSnapshot` in [`proto/dref_consensus.proto`](proto/dref_consensus.proto), plus the shared on-disk wrapper | [`compat/snapshot_vectors.json`](compat/snapshot_vectors.json), `StateMachineSnapshotStoreSpec` (Scala), `crosslang_snapshot_tests` (Rust) |
 | **Inter-node RPC** | [`proto/dref.proto`](proto/dref.proto), [`proto/dref_consensus.proto`](proto/dref_consensus.proto) | `ProtoRaftDRefSpec` (Scala), `raft_tests` (Rust) |
 | **Redis backend** | Same key layout, TTL semantics, and keyspace-notification payloads | `CrossLangRedisSpec` (Scala), `crosslang_redis_tests` (Rust) |
 
@@ -279,7 +325,7 @@ discoverable through a single service name.
    ```
 
    Every terminal prompts for a user name and message. When one node sends a
-   message it is broadcast to the other replicas through the Raft log.
+   message it is broadcast to the other replicas through consensus replication.
 
 3. Press <kbd>Ctrl</kbd>+<kbd>p</kbd> followed by <kbd>Ctrl</kbd>+<kbd>q</kbd> to
    detach from a container without stopping it. When you are done testing, stop

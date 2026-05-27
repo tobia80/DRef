@@ -25,7 +25,9 @@ pub struct MsgPackCodec<T> {
 
 impl<T> MsgPackCodec<T> {
     pub const fn new() -> Self {
-        Self { _phantom: PhantomData }
+        Self {
+            _phantom: PhantomData,
+        }
     }
 }
 

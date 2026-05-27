@@ -13,6 +13,10 @@ package io.github.tobia80;
 
 message ClusterSnapshot {
   repeated KVEntry entries = 1;
+  // Last applied consensus sequence included in this full state-machine image.
+  // Persisting it with the snapshot lets restarted nodes preserve Raft's
+  // up-to-date checks instead of rebooting with populated state but last_seq=0.
+  uint64 last_seq = 2;
 }
 
 message AppendEntriesRequest {
