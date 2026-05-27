@@ -27,6 +27,10 @@ trait CommandLogStore {
   def setCommitSeq(commitSeq: Long): Task[Unit]
   /** Drop every record with `seq <= throughSeq` and clamp the header commit index. */
   def truncateThrough(throughSeq: Long): Task[Unit]
+  /** Drop every record with `seq >= fromSeq`. Used to roll back a failed append; the header
+    * commit index is left alone (a failed append never advanced it).
+    */
+  def truncateFrom(fromSeq: Long): Task[Unit]
 }
 
 object CommandLogStore {
@@ -41,6 +45,7 @@ object CommandLogStore {
     def append(seq: Long, command: Array[Byte]): Task[Unit] = ZIO.unit
     def setCommitSeq(commitSeq: Long): Task[Unit] = ZIO.unit
     def truncateThrough(throughSeq: Long): Task[Unit] = ZIO.unit
+    def truncateFrom(fromSeq: Long): Task[Unit] = ZIO.unit
   }
 
   def file(dir: Path): Task[CommandLogStore] =
@@ -100,6 +105,20 @@ object CommandLogStore {
           val kept = loaded.entries.filter { case (seq, _) => seq > throughSeq }
           val newCommit = math.min(loaded.commitSeq, throughSeq)
           rewrite(newCommit, kept)
+        }
+      }
+
+    def truncateFrom(fromSeq: Long): Task[Unit] =
+      ZIO.attemptBlocking {
+        if !Files.exists(target) then ()
+        else {
+          val in = new DataInputStream(new FileInputStream(target.toFile))
+          val loaded =
+            try readLog(in)
+            catch case _: EOFException => throw new IOException(s"command-log file truncated: $target")
+            finally in.close()
+          val kept = loaded.entries.filter { case (seq, _) => seq < fromSeq }
+          rewrite(loaded.commitSeq, kept)
         }
       }
 

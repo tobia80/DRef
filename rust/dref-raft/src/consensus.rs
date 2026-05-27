@@ -140,6 +140,7 @@ pub struct Consensus {
     voter_store: StdArc<dyn VoterStateStore>,
     persist_mutex: Arc<Mutex<()>>,
     log_mutex: Arc<Mutex<()>>,
+    apply_mutex: Arc<Mutex<()>>,
     snapshot_store: StdArc<dyn StateMachineSnapshotStore>,
     snapshot_mutex: Arc<Mutex<()>>,
     applies_since_snapshot: Arc<std::sync::atomic::AtomicU64>,
@@ -185,12 +186,19 @@ impl Consensus {
         let recovered_commit = log_state.commit_seq.min(max_log_seq);
         let initial_commit_seq = snapshot_last_seq.max(recovered_commit);
         let initial_last_seq = snapshot_last_seq.max(max_log_seq);
+        // A gap between the snapshot tip and the committed log range means we'd be booting
+        // a state machine with missing committed entries — silent divergence. Fail-fast so
+        // the operator sees the corruption and can restore from a peer.
         for seq in (snapshot_last_seq + 1)..=initial_commit_seq {
-            if let Some(bytes) = log_state.entries.get(&seq) {
-                if let Ok(cmd) = state_command::decode(bytes) {
-                    state_machine.apply(cmd).await;
-                }
-            }
+            let bytes = log_state.entries.get(&seq).unwrap_or_else(|| {
+                panic!(
+                    "command log missing committed entry {seq} \
+                     (snapshot_last_seq={snapshot_last_seq}, commit_seq={initial_commit_seq})"
+                )
+            });
+            let cmd = state_command::decode(bytes)
+                .unwrap_or_else(|e| panic!("failed to decode committed entry {seq}: {e}"));
+            state_machine.apply(cmd).await;
         }
         let initial_pending: BTreeMap<u64, Vec<u8>> = log_state
             .entries
@@ -255,6 +263,7 @@ impl Consensus {
             voter_store,
             persist_mutex: Arc::new(Mutex::new(())),
             log_mutex: Arc::new(Mutex::new(())),
+            apply_mutex: Arc::new(Mutex::new(())),
             snapshot_store,
             snapshot_mutex: Arc::new(Mutex::new(())),
             applies_since_snapshot: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -326,14 +335,27 @@ impl Consensus {
             return;
         }
         let threshold = self.config.snapshot_every as u64;
-        let next = self
-            .applies_since_snapshot
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            + 1;
-        if next >= threshold {
-            // Reset by subtracting `next` so concurrent increments are accounted for.
-            self.applies_since_snapshot
-                .fetch_sub(next, std::sync::atomic::Ordering::Relaxed);
+        // CAS loop equivalent to Scala's Ref.modify: read the counter, decide whether to
+        // reset (if we've hit threshold) or bump (otherwise), and retry on contention. A
+        // naive fetch_add + fetch_sub can underflow a u64 under concurrent triggers.
+        use std::sync::atomic::Ordering::Relaxed;
+        let triggered = loop {
+            let prev = self.applies_since_snapshot.load(Relaxed);
+            let next = prev + 1;
+            let (new_val, triggered) = if next >= threshold {
+                (0, true)
+            } else {
+                (next, false)
+            };
+            if self
+                .applies_since_snapshot
+                .compare_exchange_weak(prev, new_val, Relaxed, Relaxed)
+                .is_ok()
+            {
+                break triggered;
+            }
+        };
+        if triggered {
             let this = self.clone();
             tokio::spawn(async move {
                 if let Err(e) = this.persist_snapshot_now().await {
@@ -347,15 +369,18 @@ impl Consensus {
     /// triggers don't both write — the second waits, then takes a fresh snapshot itself.
     async fn persist_snapshot_now(&self) -> Result<(), String> {
         let _guard = self.snapshot_mutex.lock().await;
-        let commit_seq = self.state.read().await.commit_seq;
-        let last_seq = self.state.read().await.last_seq;
+        // last_applied — NOT last_seq — is the highest seq actually reflected in the state
+        // machine. On a follower, last_seq can race ahead of last_applied via AppendEntries
+        // before the commit catches up; saving last_seq would make the snapshot file lie
+        // about what's been applied and silently lose entries on restart.
+        let last_applied = self.state.read().await.last_applied;
         let mut snapshot = self.state_machine.take_snapshot().await;
-        snapshot.last_seq = last_seq;
+        snapshot.last_seq = last_applied;
         self.snapshot_store
             .save(&snapshot)
             .map_err(|e| e.to_string())?;
         self.with_command_log(|log| {
-            log.truncate_through(commit_seq)
+            log.truncate_through(last_applied)
                 .map_err(|e| e.to_string())
         })
         .await
@@ -426,48 +451,74 @@ impl Consensus {
         cluster_size / 2 + 1
     }
 
+    /// Apply pending entries up to `commit_seq` and advance the committed/applied markers.
+    ///
+    /// Serialised on `apply_mutex` so concurrent inbound RPCs (e.g. a heartbeat racing an
+    /// AppendEntries with a larger `commit_seq`) cannot both pass the guard and double-apply
+    /// the same pending entry.
+    ///
+    /// The effective commit index is capped to `last_seq` — a leader may legitimately
+    /// advertise a `commit_seq` past entries we haven't received yet, and we must not
+    /// advance our on-disk commit past entries that aren't in our log. If a pending entry
+    /// is still missing within the effective range (a concurrent AppendEntries bumped
+    /// `last_seq` but hasn't yet inserted the bytes), we stop at the last successfully
+    /// applied seq; the next call retries.
     async fn apply_committed(&self, commit_seq: u64) {
-        let start = {
+        let _guard = self.apply_mutex.lock().await;
+        let (start, effective, current_commit) = {
             let st = self.state.read().await;
-            if commit_seq <= st.commit_seq {
+            let effective = commit_seq.min(st.last_seq);
+            if effective <= st.commit_seq {
                 return;
             }
-            st.last_applied + 1
+            (st.last_applied + 1, effective, st.commit_seq)
         };
-        for seq in start..=commit_seq {
+        let mut last_success: Option<u64> = None;
+        for seq in start..=effective {
             let bytes = {
                 let pending = self.pending.read().await;
                 pending.get(&seq).cloned()
             };
             let Some(bytes) = bytes else {
-                warn!(seq, commit_seq, "missing pending entry while applying commit");
-                return;
+                warn!(
+                    seq,
+                    commit_seq = effective,
+                    "pending entry for committed seq not yet present; deferring"
+                );
+                break;
             };
             match state_command::decode(&bytes) {
                 Ok(cmd) => {
                     self.state_machine.apply(cmd).await;
-                    self.note_applied().await;
                     {
                         let mut st = self.state.write().await;
                         st.last_applied = seq;
                     }
                     self.pending.write().await.remove(&seq);
+                    // note_applied runs *after* last_applied is updated so a forked snapshot
+                    // reads a consistent (last_applied, state-machine) pair.
+                    self.note_applied().await;
+                    last_success = Some(seq);
                 }
                 Err(e) => {
-                    warn!(error = ?e, seq, "failed to decode pending entry");
-                    return;
+                    warn!(error = ?e, seq, "failed to decode pending entry; deferring");
+                    break;
                 }
             }
         }
-        {
-            let mut st = self.state.write().await;
-            if commit_seq > st.commit_seq {
-                st.commit_seq = commit_seq;
+        if let Some(lastest) = last_success {
+            if lastest > current_commit {
+                {
+                    let mut st = self.state.write().await;
+                    if lastest > st.commit_seq {
+                        st.commit_seq = lastest;
+                    }
+                }
+                let _ = self
+                    .with_command_log(|log| log.set_commit_seq(lastest))
+                    .await;
             }
         }
-        let _ = self
-            .with_command_log(|log| log.set_commit_seq(commit_seq))
-            .await;
     }
 
     async fn propagate_commit_seq(&self, commit_seq: u64, term: u64) {
@@ -546,7 +597,7 @@ impl Consensus {
         let total_acks = 1 + follower_acks;
         if total_acks < needed {
             let _ = self
-                .with_command_log(|log| log.truncate_through(seq - 1))
+                .with_command_log(|log| log.truncate_from(seq))
                 .await;
             let mut st = self.state.write().await;
             st.last_seq = seq - 1;
@@ -694,9 +745,11 @@ impl Consensus {
     }
 
     async fn send_snapshot_to(&self, peer_id: &str, peer: &Arc<PeerConn>) {
-        let (term, last_seq, still_leader) = {
+        // last_applied — NOT last_seq — bounds the snapshot. Sending last_seq would let the
+        // follower advance its commit index past entries the leader itself hasn't applied.
+        let (term, last_applied, still_leader) = {
             let st = self.state.read().await;
-            (st.term, st.last_seq, st.role == Role::Leader)
+            (st.term, st.last_applied, st.role == Role::Leader)
         };
         if !still_leader {
             return;
@@ -708,7 +761,7 @@ impl Consensus {
                     leader_id: self.node_id.clone(),
                     term,
                     snapshot: Some(snapshot),
-                    last_seq,
+                    last_seq: last_applied,
                 };
                 match client.install_snapshot(req).await {
                     Ok(resp) => {
@@ -1188,9 +1241,10 @@ impl Consensus {
     /// Send the current state machine snapshot to every peer. Called when
     /// we just won an election or when a follower asks to be caught up.
     async fn broadcast_snapshot(&self) {
-        let (term, last_seq) = {
+        // Snapshot covers entries applied through last_applied — see send_snapshot_to.
+        let (term, last_applied) = {
             let st = self.state.read().await;
-            (st.term, st.last_seq)
+            (st.term, st.last_applied)
         };
         let snapshot = self.state_machine.take_snapshot().await;
         let peers: Vec<(String, Arc<PeerConn>)> = self
@@ -1212,7 +1266,7 @@ impl Consensus {
                             leader_id,
                             term,
                             snapshot: Some(snapshot),
-                            last_seq,
+                            last_seq: last_applied,
                         };
                         match client.install_snapshot(req).await {
                             Ok(resp) => {

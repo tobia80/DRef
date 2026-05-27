@@ -55,6 +55,7 @@ final class ProtoConsensusEngine private (
   commandLogStore: CommandLogStore,
   persistMutex: Semaphore,
   logMutex: Semaphore,
+  applyMutex: Semaphore,
   snapshotStore: StateMachineSnapshotStore,
   snapshotMutex: Semaphore,
   appliesSinceSnapshot: Ref[Long]
@@ -136,8 +137,12 @@ final class ProtoConsensusEngine private (
       for {
         st       <- stateRef.get
         snapshot <- stateMachine.takeSnapshot
-        _        <- snapshotStore.save(snapshot.copy(lastSeq = st.lastSeq))
-        _        <- withCommandLog(_.truncateThrough(st.commitSeq))
+        // lastApplied — NOT lastSeq — is the highest seq actually reflected in the state
+        // machine. On a follower, lastSeq can race ahead of lastApplied via AppendEntries
+        // before the commit catches up; saving lastSeq would make the snapshot file lie
+        // about what's been applied and silently lose entries on restart.
+        _        <- snapshotStore.save(snapshot.copy(lastSeq = st.lastApplied))
+        _        <- withCommandLog(_.truncateThrough(st.lastApplied))
       } yield ()
     }
 
@@ -154,34 +159,58 @@ final class ProtoConsensusEngine private (
     */
   def currentTerm: UIO[Long] = stateRef.get.map(_.term)
 
-  /** Apply pending entries up to `commitSeq` and advance the committed/applied markers. */
+  /** Apply pending entries up to `commitSeq` and advance the committed/applied markers.
+    *
+    * Serialised on `applyMutex` so concurrent inbound RPCs (e.g. a heartbeat racing an
+    * AppendEntries with a larger commitSeq) cannot both pass the guard and double-apply the
+    * same pending entry.
+    *
+    * The effective commit index is capped to `lastSeq` — a leader may legitimately advertise
+    * a commitSeq past entries we haven't received yet, and we must not advance our on-disk
+    * commit past entries that aren't in our log. If a pending entry is still missing within
+    * the effective range (a concurrent AppendEntries bumped lastSeq but hasn't yet inserted
+    * the bytes), we stop at the last successfully applied seq; the next call retries.
+    */
   private def applyCommitted(commitSeq: Long): UIO[Unit] =
-    stateRef.get.flatMap { st =>
-      if commitSeq <= st.commitSeq then ZIO.unit
-      else
-        ZIO
-          .foldLeft((st.lastApplied + 1L) to commitSeq)(()) { (_, seq) =>
-            for {
-              pending <- pendingRef.get
-              _       <- pending.get(seq) match {
-                           case Some(value) =>
-                             for {
-                               cmd <- ZIO.attempt(StateCommand.parseFrom(value)).orDie
-                               _   <- stateMachine.apply(cmd)
-                               _   <- noteApplied
-                               _   <- stateRef.update(s => s.copy(lastApplied = seq))
-                               _   <- pendingRef.update(_ - seq)
-                             } yield ()
-                           case None =>
-                             ZIO.logWarning(s"missing pending entry for seq $seq")
-                         }
-            } yield ()
-          }
-          .flatMap(_ =>
-            stateRef.update(_.copy(commitSeq = commitSeq)) *>
-              withCommandLog(_.setCommitSeq(commitSeq))
-          )
+    applyMutex.withPermit {
+      stateRef.get.flatMap { st =>
+        val effective = math.min(commitSeq, st.lastSeq)
+        if effective <= st.commitSeq then ZIO.unit
+        else applyLoop(st.lastApplied + 1L, effective)
+      }
     }
+
+  private def applyLoop(start: Long, end: Long): UIO[Unit] = {
+    def advanceCommit(lastSuccess: Long): UIO[Unit] =
+      if lastSuccess >= start then
+        stateRef.update(_.copy(commitSeq = lastSuccess)) *>
+          withCommandLog(_.setCommitSeq(lastSuccess))
+      else ZIO.unit
+
+    def go(seq: Long, lastSuccess: Long): UIO[Unit] =
+      if seq > end then advanceCommit(lastSuccess)
+      else
+        pendingRef.get.flatMap { pending =>
+          pending.get(seq) match {
+            case Some(value) =>
+              for {
+                cmd <- ZIO.attempt(StateCommand.parseFrom(value)).orDie
+                _   <- stateMachine.apply(cmd)
+                _   <- stateRef.update(s => s.copy(lastApplied = seq))
+                _   <- pendingRef.update(_ - seq)
+                // noteApplied runs *after* lastApplied is updated so a forked snapshot
+                // reads a consistent (lastApplied, state-machine) pair.
+                _   <- noteApplied
+                _   <- go(seq + 1L, seq)
+              } yield ()
+            case None =>
+              ZIO.logWarning(s"pending entry for committed seq $seq not yet present; deferring") *>
+                advanceCommit(lastSuccess)
+          }
+        }
+
+    go(start, start - 1L)
+  }
 
   /** Push the current commit index to every follower so they apply pending entries. */
   private def propagateCommitSeq(commitSeq: Long, term: Long): UIO[Unit] =
@@ -216,7 +245,7 @@ final class ProtoConsensusEngine private (
       followerAcks                <- replicateForQuorum(term, seq, bytes, commitSeqBefore)
       totalAcks                    = 1 + followerAcks
       _                           <- ZIO.when(totalAcks < needed) {
-                                       withCommandLog(_.truncateThrough(seq - 1)) *>
+                                       withCommandLog(_.truncateFrom(seq)) *>
                                          stateRef.update(_.copy(lastSeq = seq - 1)) *>
                                          ZIO.fail(ConsensusError.QuorumLost)
                                      }
@@ -443,13 +472,15 @@ final class ProtoConsensusEngine private (
     for {
       st       <- stateRef.get
       snapshot <- stateMachine.takeSnapshot
+      // The snapshot reflects entries applied through lastApplied. Sending lastSeq would let
+      // the follower jump its commit index past entries the leader itself hasn't applied.
       _        <- client
                     .installSnapshot(
                       InstallSnapshotRequest(
                         leaderId = nodeId,
                         term = st.term,
                         snapshot = Some(snapshot),
-                        lastSeq = st.lastSeq
+                        lastSeq = st.lastApplied
                       )
                     )
                     .foldZIO(
@@ -599,7 +630,8 @@ final class ProtoConsensusEngine private (
                             leaderId = nodeId,
                             term = st.term,
                             snapshot = Some(snapshot),
-                            lastSeq = st.lastSeq
+                            // Snapshot covers entries applied through lastApplied — see sendSnapshotTo.
+                            lastSeq = st.lastApplied
                           )
                         )
                         .foldZIO(
@@ -669,11 +701,17 @@ object ProtoConsensusEngine {
       recoveredCommit = math.min(logState.commitSeq, maxLogSeq)
       initialCommitSeq = math.max(snapshotLastSeq, recoveredCommit)
       initialLastSeq   = math.max(snapshotLastSeq, maxLogSeq)
+      // A gap between the snapshot tip and the committed log range means we'd be
+      // booting a state machine with missing committed entries — silent divergence.
+      // Fail-fast so the operator sees the corruption and can restore from a peer.
       _              <- ZIO.foreachDiscard((snapshotLastSeq + 1L) to initialCommitSeq) { seq =>
                           logState.entries.get(seq) match {
                             case Some(bytes) =>
                               ZIO.attempt(StateCommand.parseFrom(bytes)).flatMap(stateMachine.apply).orDie
-                            case None        => ZIO.unit
+                            case None        =>
+                              ZIO.dieMessage(
+                                s"command log missing committed entry $seq (snapshotLastSeq=$snapshotLastSeq, commitSeq=$initialCommitSeq)"
+                              )
                           }
                         }
       initialPending  = logState.entries.filter { case (s, _) => s > initialCommitSeq }
@@ -709,6 +747,7 @@ object ProtoConsensusEngine {
                           .when(initialTerm != loaded.term || initialVotedFor != loaded.votedFor)
       persistMutex   <- Semaphore.make(1)
       logMutex       <- Semaphore.make(1)
+      applyMutex     <- Semaphore.make(1)
       snapshotMutex  <- Semaphore.make(1)
       appliesRef     <- Ref.make(0L)
       peersRef       <- Ref.make(peers)
@@ -723,6 +762,7 @@ object ProtoConsensusEngine {
       commandLogStore,
       persistMutex,
       logMutex,
+      applyMutex,
       snapshotStore,
       snapshotMutex,
       appliesRef

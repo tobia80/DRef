@@ -68,6 +68,25 @@ object CommandLogStoreSpec extends ZIOSpecDefault {
         state.entries.get(2L).exists(_.sameElements(Array[Byte](2)))
       )
     },
+    test("truncateFrom drops failed suffix and leaves commit untouched") {
+      for {
+        dir   <- tempDir
+        store <- CommandLogStore.file(dir)
+        _     <- store.append(1L, Array[Byte](1))
+        _     <- store.append(2L, Array[Byte](2))
+        _     <- store.append(3L, Array[Byte](3))
+        _     <- store.setCommitSeq(2L)
+        // Roll back the failed append at seq=3.
+        _     <- store.truncateFrom(3L)
+        state <- store.load
+      } yield assertTrue(
+        // commit index is untouched by a rollback.
+        state.commitSeq == 2L,
+        state.entries.get(1L).exists(_.sameElements(Array[Byte](1))),
+        state.entries.get(2L).exists(_.sameElements(Array[Byte](2))),
+        state.entries.get(3L).isEmpty
+      )
+    },
     test("on-disk bytes match cross-language golden vectors") {
       val cmd = StateCommands.setElement("my-key", Array[Byte](1, 2, 3), Some(1700000000L)).toByteArray
       val encoded = CommandLogStore.encodeForTest(CommandLogEntry(1L, cmd), commitSeq = 0L)
