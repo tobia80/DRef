@@ -35,7 +35,7 @@ redis-cli ping  # should return PONG
 
 | Scope | Command | External deps |
 |-------|---------|---------------|
-| Scala – all | `sbt test` | Redis on localhost:6379 |
+| Scala – all | `sbt test` | Redis on localhost:6379; PostgreSQL on localhost:5432 (`dref_test` DB) for Raft postgres storage tests |
 | Scala – core + raft only | `sbt dref-core/test dref-raft/test` | None |
 | Rust – core + raft | `cd rust && cargo test -p dref-core -p dref-raft` | None |
 | Rust – redis | `cd rust && cargo test -p dref-redis --features test-redis` | Redis on localhost:6379 |

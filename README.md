@@ -205,15 +205,20 @@ twice in the same term. It also snapshots the state machine to the same storage
 directory and restores both the key/value contents and the last applied
 consensus sequence on restart.
 
-DRef is restart-safe as long as each node is configured with a stable
-`storageDir`.
+DRef is restart-safe when each node has durable storage. You can use either a
+local directory (`storageDir`) or PostgreSQL (`postgres`).
 
 ```scala
 ProtoRaftConfig(
   port = 8082,
-  // Required for any multi-node cluster that needs to survive restarts.
-  // Point this at a stable per-node volume (PersistentVolumeClaim on K8s).
+  // Option A — local disk (typical with a per-pod PersistentVolumeClaim).
   storageDir = Some(java.nio.file.Paths.get("/var/lib/dref/node-1")),
+  // Option B — shared PostgreSQL (works with ephemeral pods / Deployments).
+  // postgres = Some(RaftPostgresConfig(
+  //   jdbcUrl = "jdbc:postgresql://postgres:5432/dref",
+  //   user = Some("dref"),
+  //   password = Some("secret"),
+  // )),
   // Persist a state-machine snapshot after every N applied commands.
   // Set to 0 to disable automatic snapshots.
   snapshotEvery = 1000,
@@ -221,12 +226,16 @@ ProtoRaftConfig(
 )
 ```
 
-If `storageDir` is `None` (the default), the node keeps voter state and
-snapshots in memory only. That is fine for single-process tests but unsafe for
-multi-node clusters: a node that restarts without persistent `votedFor` can
-grant a second vote in the same term, and a node that restarts without a
-snapshot must be reseeded by the leader. Deploy multi-node Raft clusters with a
-per-node PersistentVolumeClaim (or equivalent) rather than a plain `Deployment`.
+When `postgres` is set it takes precedence over `storageDir`. Each node writes
+its voter state and snapshots under its stable `nodeId`, so a multi-node cluster
+can run as a Kubernetes `Deployment` (no StatefulSet or per-pod volume) as long
+as every replica has a distinct `nodeId` and points at the same database.
+
+If both `storageDir` and `postgres` are unset (the default), the node keeps
+voter state and snapshots in memory only. That is fine for single-process tests
+but unsafe for multi-node clusters: a node that restarts without persistent
+`votedFor` can grant a second vote in the same term, and a node that restarts
+without a snapshot must be reseeded by the leader.
 
 Snapshots are full state-machine images, not durable Raft log segments. The
 current consensus engine uses monotonic sequence numbers and `InstallSnapshot`
