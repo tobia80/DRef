@@ -45,6 +45,7 @@ val raftDeps = Seq(
   "com.thesamet.scalapb.zio-grpc" %% "zio-grpc-core" % "0.6.3",
   "org.apache.commons"             % "commons-lang3" % "3.20.0",
   "io.projectreactor"              % "reactor-core"  % "3.8.5",
+  "org.postgresql"                 % "postgresql"    % "42.7.7",
 
   // grpc
   "io.grpc"               % "grpc-netty"           % "1.81.0",

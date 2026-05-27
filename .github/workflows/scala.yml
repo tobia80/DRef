@@ -28,6 +28,18 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: dref_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d dref_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - uses: actions/checkout@v4
@@ -40,6 +52,10 @@ jobs:
       - name: Setup sbt
         uses: sbt/setup-sbt@v1
       - name: Run tests
+        env:
+          DREF_TEST_POSTGRES_JDBC_URL: jdbc:postgresql://localhost:5432/dref_test
+          DREF_TEST_POSTGRES_USER: postgres
+          DREF_TEST_POSTGRES_PASSWORD: test
         run: sbt test
 
   rust:

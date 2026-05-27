@@ -92,8 +92,8 @@ final class ProtoConsensusEngine private (
       } yield result
     }
 
-  /** Record that a command was successfully applied. When the running tally crosses the configured
-    * `snapshotEvery` threshold, fork off a snapshot write so the on-disk picture catches up.
+  /** Record that a command was successfully applied. When the running tally crosses the configured `snapshotEvery`
+    * threshold, fork off a snapshot write so the on-disk picture catches up.
     *
     * The write is forked rather than awaited: snapshotting is a *durability* optimisation, not a correctness
     * requirement, so a slow disk must not stretch out replication latency. If the write fails we log and reset the
@@ -102,17 +102,22 @@ final class ProtoConsensusEngine private (
   private def noteApplied: UIO[Unit] =
     if config.snapshotEvery <= 0 then ZIO.unit
     else
-      appliesSinceSnapshot.modify { n =>
-        val next = n + 1L
-        if next >= config.snapshotEvery.toLong then (true, 0L) else (false, next)
-      }.flatMap { shouldSnapshot =>
-        ZIO.when(shouldSnapshot)(persistSnapshotInBackground).unit
-      }
+      appliesSinceSnapshot
+        .modify { n =>
+          val next = n + 1L
+          if next >= config.snapshotEvery.toLong then (true, 0L) else (false, next)
+        }
+        .flatMap { shouldSnapshot =>
+          ZIO.when(shouldSnapshot)(persistSnapshotInBackground).unit
+        }
 
   private def persistSnapshotInBackground: UIO[Unit] =
-    persistSnapshotNow.catchAll { t =>
-      ZIO.logWarningCause(s"state-machine snapshot save failed on node $nodeId", Cause.fail(t))
-    }.forkDaemon.unit
+    persistSnapshotNow
+      .catchAll { t =>
+        ZIO.logWarningCause(s"state-machine snapshot save failed on node $nodeId", Cause.fail(t))
+      }
+      .forkDaemon
+      .unit
 
   /** Take a snapshot of the state machine and fsync it to disk. Serialised so concurrent triggers don't both write —
     * the second waits for the first, then takes a fresh snapshot itself.
@@ -212,19 +217,19 @@ final class ProtoConsensusEngine private (
   /** Handle a PreVote request (Ongaro thesis §9.6).
     *
     * PreVote is a "would-you-vote-for-me" probe a candidate runs BEFORE it actually bumps its term. The voter:
-    *   1. does NOT change its own `term` / `votedFor` — granting a PreVote is hypothetical, so there is nothing to fsync;
-    *   2. refuses if it has heard from a leader within the election timeout — that is the disruption guard PreVote
-    *      exists for, since a partitioned node that kept incrementing its term in isolation must not be able to force
-    *      a real election on rejoin;
-    *   3. otherwise grants iff `lastSeq` is at least as up-to-date as ours AND the proposed term strictly beats ours.
+    *   1. does NOT change its own `term` / `votedFor` — granting a PreVote is hypothetical, so there is nothing to
+    *      fsync; 2. refuses if it has heard from a leader within the election timeout — that is the disruption guard
+    *      PreVote exists for, since a partitioned node that kept incrementing its term in isolation must not be able to
+    *      force a real election on rejoin; 3. otherwise grants iff `lastSeq` is at least as up-to-date as ours AND the
+    *      proposed term strictly beats ours.
     *
     * The returned term is always our current term — the voter never adopts the candidate's hypothetical term.
     */
   def handlePreVote(candidateId: String, term: Long, lastSeq: Long): UIO[(Boolean, Long)] =
     for {
-      now      <- ZIO.succeed(java.lang.System.nanoTime())
-      st       <- stateRef.get
-      response  =
+      now     <- ZIO.succeed(java.lang.System.nanoTime())
+      st      <- stateRef.get
+      response =
         if term <= st.term then (false, st.term)
         else
           // A node still in the Leader role refuses pre-votes outright — granting one would amount to volunteering
@@ -232,9 +237,9 @@ final class ProtoConsensusEngine private (
           // AppendEntries/Heartbeat response; until that signal arrives it trusts its own role. For followers, the
           // recency check on the last heartbeat plays the equivalent role: if we've heard from a leader within the
           // election timeout, the cluster is healthy and we shouldn't help an isolated candidate disrupt it.
-          val elapsedNanos    = now - st.lastHeartbeatNanos
-          val leaderRecent    = st.leaderId.isDefined && elapsedNanos < config.electionTimeout.toNanos
-          val isActiveLeader  = st.role == Role.Leader
+          val elapsedNanos = now - st.lastHeartbeatNanos
+          val leaderRecent = st.leaderId.isDefined && elapsedNanos < config.electionTimeout.toNanos
+          val isActiveLeader = st.role == Role.Leader
           if isActiveLeader || leaderRecent then (false, st.term)
           else
             val upToDate = lastSeq >= st.lastSeq
@@ -388,41 +393,41 @@ final class ProtoConsensusEngine private (
     */
   private def runPreVote: UIO[Boolean] =
     for {
-      st            <- stateRef.get
-      currentTerm    = st.term
-      proposedTerm   = currentTerm + 1
-      lastSeq        = st.lastSeq
-      peers         <- peersRef.get
-      clusterSize    = peers.size + 1
-      needed         = clusterSize / 2 + 1
-      responses     <- ZIO.foreachPar(peers.toList) { case (peerId, client) =>
-                         client
-                           .requestPreVote(
-                             PreVoteRequest(candidateId = nodeId, term = proposedTerm, lastSeq = lastSeq)
-                           )
-                           .map(Some(_))
-                           .catchAll { _ =>
-                             ZIO.logDebug(s"pre-vote request failed for peer $peerId") *> ZIO.none
-                           }
-                       }
-      higherTerm     = responses.flatten.collect { case resp if resp.term > currentTerm => resp.term }.headOption
-      result        <- higherTerm match {
-                         case Some(newTerm) => stepDownIfStale(newTerm).as(false)
-                         case None          =>
-                           val grants = 1 + responses.flatten.count(_.granted)
-                           ZIO.succeed(grants >= needed)
-                       }
+      st          <- stateRef.get
+      currentTerm  = st.term
+      proposedTerm = currentTerm + 1
+      lastSeq      = st.lastSeq
+      peers       <- peersRef.get
+      clusterSize  = peers.size + 1
+      needed       = clusterSize / 2 + 1
+      responses   <- ZIO.foreachPar(peers.toList) { case (peerId, client) =>
+                       client
+                         .requestPreVote(
+                           PreVoteRequest(candidateId = nodeId, term = proposedTerm, lastSeq = lastSeq)
+                         )
+                         .map(Some(_))
+                         .catchAll { _ =>
+                           ZIO.logDebug(s"pre-vote request failed for peer $peerId") *> ZIO.none
+                         }
+                     }
+      higherTerm   = responses.flatten.collect { case resp if resp.term > currentTerm => resp.term }.headOption
+      result      <- higherTerm match {
+                       case Some(newTerm) => stepDownIfStale(newTerm).as(false)
+                       case None          =>
+                         val grants = 1 + responses.flatten.count(_.granted)
+                         ZIO.succeed(grants >= needed)
+                     }
     } yield result
 
   private def startElection: UIO[Unit] =
     for {
-      passed                     <- runPreVote
-      _                          <- if !passed then
-                                      // Refresh the heartbeat clock so we don't immediately spin into another
-                                      // pre-vote attempt on the next tick — the guard would just reject us again.
-                                      stateRef.update(_.copy(lastHeartbeatNanos = java.lang.System.nanoTime())) *>
-                                        ZIO.logDebug(s"pre-vote failed on node $nodeId; staying follower")
-                                    else realElection
+      passed <- runPreVote
+      _      <- if !passed then
+                  // Refresh the heartbeat clock so we don't immediately spin into another
+                  // pre-vote attempt on the next tick — the guard would just reject us again.
+                  stateRef.update(_.copy(lastHeartbeatNanos = java.lang.System.nanoTime())) *>
+                    ZIO.logDebug(s"pre-vote failed on node $nodeId; staying follower")
+                else realElection
     } yield ()
 
   private def realElection: UIO[Unit] =
@@ -532,13 +537,21 @@ object ProtoConsensusEngine {
                             .map(ep.id -> _)
                         }
       peers           = peerEntries.toMap
-      voterStore     <- config.storageDir match {
-                          case Some(path) => VoterStateStore.file(path)
-                          case None       => ZIO.succeed(VoterStateStore.noop)
+      voterStore     <- config.postgres match {
+                          case Some(pg) => RaftPostgresStorage.voterStateStore(pg, nodeId)
+                          case None     =>
+                            config.storageDir match {
+                              case Some(path) => VoterStateStore.file(path)
+                              case None       => ZIO.succeed(VoterStateStore.noop)
+                            }
                         }
-      snapshotStore  <- config.storageDir match {
-                          case Some(path) => StateMachineSnapshotStore.file(path)
-                          case None       => ZIO.succeed(StateMachineSnapshotStore.noop)
+      snapshotStore  <- config.postgres match {
+                          case Some(pg) => RaftPostgresStorage.snapshotStore(pg, nodeId)
+                          case None     =>
+                            config.storageDir match {
+                              case Some(path) => StateMachineSnapshotStore.file(path)
+                              case None       => ZIO.succeed(StateMachineSnapshotStore.noop)
+                            }
                         }
       // Hydrate the state machine BEFORE peers come online so we don't serve
       // empty reads or accept appends against a stale lastSeq baseline. If the
