@@ -127,16 +127,37 @@ object ProtoRaftDRefSpec extends ZIOSpecDefault {
         leaders <- ZIO.foreach(nodes)(_.isLeader)
       } yield assertTrue(leaders.count(identity) == 1)
     },
-    test("write through any node propagates to all nodes") {
+    test("write through any node propagates to all nodes without extra delay") {
       for {
         nodes  <- startCluster(3)
         writer <- ZIO
                     .foreach(nodes)(n => n.isLeader.map(b => (n, b)))
                     .map(_.find(!_._2).map(_._1).getOrElse(nodes.head))
         _      <- writer.setElement("propagated", "yes".getBytes, None)
-        _      <- ZIO.sleep(300.millis)
         values <- ZIO.foreach(nodes)(_.getElement("propagated"))
       } yield assertTrue(values.forall(_.exists(_.sameElements("yes".getBytes))))
+    },
+    test("write fails when a quorum is unreachable") {
+      for {
+        ports  <- ZIO.foreach(List.fill(3)(()))(_ => freePort)
+        scopes <- ZIO.foreach((0 until 3).toList)(_ => Scope.make)
+        start   = (idx: Int) =>
+                    scopes(idx).extend[Any](
+                      ProtoRaftDRefContext.start(makeClusterConfig(ports, idx, s"node-$idx"), 2.seconds)
+                    )
+        nodes  <- ZIO.foreach((0 until 3).toList)(start)
+        _      <- ZIO.addFinalizer(ZIO.foreachDiscard(scopes)(_.close(Exit.unit)))
+        _      <- waitForSingleLeader(nodes)
+        _      <- waitForStableLeader(nodes)
+        leaderIdx <- ZIO
+                       .foreach(nodes.zipWithIndex) { case (n, i) => n.isLeader.map(i -> _) }
+                       .map(_.collectFirst { case (i, true) => i }.get)
+        followerIdxs = (0 until 3).filter(_ != leaderIdx).toList
+        _      <- ZIO.foreachDiscard(followerIdxs)(idx => scopes(idx).close(Exit.unit))
+        _      <- ZIO.sleep(100.millis)
+        // With only the leader alive, a three-node cluster cannot reach a majority.
+        result <- nodes(leaderIdx).setElement("quorum-key", "nope".getBytes, None).either
+      } yield assertTrue(result.isLeft)
     },
     test("on_change_stream observes replicated writes") {
       for {

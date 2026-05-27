@@ -5,6 +5,7 @@
 //! (`proto/state_command.proto`) so Scala and Rust nodes can participate in
 //! the same cluster.
 
+pub mod command_log_store;
 pub mod config;
 pub mod consensus;
 pub mod context;
@@ -35,6 +36,9 @@ pub mod proto {
     }
 }
 
+pub use command_log_store::{
+    CommandLogEntry, CommandLogState, CommandLogStore, FileCommandLogStore, NoopCommandLogStore,
+};
 pub use config::{NodeEndpoint, RaftConfig};
 pub use context::RaftDRefContext;
 pub use ip_provider::{

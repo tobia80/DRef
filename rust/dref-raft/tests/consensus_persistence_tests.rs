@@ -93,7 +93,7 @@ async fn with_storage_higher_term_via_append_entries_persists() {
     rm_dir(&dir);
     let engine = make_engine(Some(dir.clone())).await;
     engine
-        .handle_append_entries("leader-x".to_string(), 12, 0, vec![])
+        .handle_append_entries("leader-x".to_string(), 12, 0, vec![], 0)
         .await;
     let store = FileVoterStateStore::open(&dir).unwrap();
     let persisted = store.load().unwrap();
@@ -197,7 +197,7 @@ async fn pre_vote_refused_when_recent_leader_heartbeat() {
     // Step down from single-node leader so we're a follower observing an
     // external leader.
     engine.test_step_down_if_stale(1).await;
-    engine.handle_heartbeat("leader-x".to_string(), 1).await;
+    engine.handle_heartbeat("leader-x".to_string(), 1, 0).await;
 
     let (granted, term) = engine.handle_pre_vote("disruptor".to_string(), 50, 0).await;
     assert!(!granted, "must refuse pre-vote while a leader is fresh");

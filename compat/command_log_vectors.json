@@ -1,0 +1,17 @@
+{
+  "description": "Golden on-disk bytes for CommandLogStore (magic DRFL) shared by Scala and Rust.",
+  "vectors": [
+    {
+      "name": "empty_header",
+      "commit_seq": 0,
+      "hex": "4452464c010000000000000000"
+    },
+    {
+      "name": "single_set_element_record",
+      "commit_seq": 0,
+      "seq": 1,
+      "command_payload_hex": "0a130a066d792d6b657912030102031880e2cfaa06",
+      "hex": "4452464c0100000000000000000000000000000001000000150a130a066d792d6b657912030102031880e2cfaa06"
+    }
+  ]
+}

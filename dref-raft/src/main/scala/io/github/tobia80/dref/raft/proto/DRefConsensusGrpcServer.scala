@@ -17,7 +17,8 @@ final class DRefConsensusGrpcServer(consensus: ProtoConsensusEngine) extends ZDR
         request.leaderId,
         request.term,
         request.seq,
-        request.command.toByteArray
+        request.command.toByteArray,
+        request.commitSeq
       )
       .map { case (success, term) => AppendEntriesResponse(success, term) }
 
@@ -26,8 +27,16 @@ final class DRefConsensusGrpcServer(consensus: ProtoConsensusEngine) extends ZDR
     context: RequestContext
   ): IO[StatusException, HeartbeatResponse] =
     consensus
-      .handleHeartbeat(request.leaderId, request.term)
+      .handleHeartbeat(request.leaderId, request.term, request.commitSeq)
       .map { case (acknowledged, term) => HeartbeatResponse(acknowledged, term) }
+
+  override def readIndex(
+    request: ReadIndexRequest,
+    context: RequestContext
+  ): IO[StatusException, ReadIndexResponse] =
+    consensus
+      .handleReadIndex(request.leaderId, request.term)
+      .map { case (granted, term) => ReadIndexResponse(granted, term) }
 
   override def requestVote(
     request: VoteRequest,

@@ -20,8 +20,8 @@ use crate::proto::dref::{
 use crate::proto::dref_consensus::d_ref_consensus_server::DRefConsensus;
 use crate::proto::dref_consensus::{
     AppendEntriesRequest, AppendEntriesResponse, HeartbeatRequest, HeartbeatResponse,
-    InstallSnapshotRequest, InstallSnapshotResponse, PreVoteRequest, PreVoteResponse, VoteRequest,
-    VoteResponse,
+    InstallSnapshotRequest, InstallSnapshotResponse, PreVoteRequest, PreVoteResponse,
+    ReadIndexRequest, ReadIndexResponse, VoteRequest, VoteResponse,
 };
 use crate::state_command::StateCommand;
 use crate::state_machine::{unix_millis, ApplyResult};
@@ -50,6 +50,7 @@ impl DRefRaftService {
                 Status::failed_precondition(desc)
             }
             ConsensusError::NoLeader => Status::failed_precondition("no-leader:unknown"),
+            ConsensusError::QuorumLost => Status::unavailable("quorum-lost"),
             ConsensusError::Serialize(s) => Status::internal(format!("serialize: {s}")),
             ConsensusError::Transport(s) => Status::unavailable(s),
         }
@@ -87,11 +88,7 @@ impl DRefRaft for DRefRaftService {
         request: Request<GetElementRequest>,
     ) -> Result<Response<GetElementResponse>, Status> {
         let r = request.into_inner();
-        if !self.consensus.is_leader().await {
-            return Err(Self::map_err(ConsensusError::NotLeader {
-                leader_id: self.consensus.leader_id().await,
-            }));
-        }
+        self.consensus.read_index().await.map_err(Self::map_err)?;
         let value = self.consensus.state_machine.get(&r.name).await;
         Ok(Response::new(GetElementResponse { value }))
     }
@@ -154,7 +151,7 @@ impl DRefConsensus for DRefConsensusService {
         let r = request.into_inner();
         let (success, term) = self
             .consensus
-            .handle_append_entries(r.leader_id, r.term, r.seq, r.command)
+            .handle_append_entries(r.leader_id, r.term, r.seq, r.command, r.commit_seq)
             .await;
         Ok(Response::new(AppendEntriesResponse { success, term }))
     }
@@ -164,8 +161,23 @@ impl DRefConsensus for DRefConsensusService {
         request: Request<HeartbeatRequest>,
     ) -> Result<Response<HeartbeatResponse>, Status> {
         let r = request.into_inner();
-        let (acknowledged, term) = self.consensus.handle_heartbeat(r.leader_id, r.term).await;
+        let (acknowledged, term) = self
+            .consensus
+            .handle_heartbeat(r.leader_id, r.term, r.commit_seq)
+            .await;
         Ok(Response::new(HeartbeatResponse { acknowledged, term }))
+    }
+
+    async fn read_index(
+        &self,
+        request: Request<ReadIndexRequest>,
+    ) -> Result<Response<ReadIndexResponse>, Status> {
+        let r = request.into_inner();
+        let (granted, term) = self
+            .consensus
+            .handle_read_index(r.leader_id, r.term)
+            .await;
+        Ok(Response::new(ReadIndexResponse { granted, term }))
     }
 
     async fn request_vote(

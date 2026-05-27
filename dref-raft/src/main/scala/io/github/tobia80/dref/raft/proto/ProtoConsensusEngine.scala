@@ -18,6 +18,8 @@ final private case class ConsensusState(
   votedFor: Option[String],
   leaderId: Option[String],
   lastSeq: Long,
+  commitSeq: Long,
+  lastApplied: Long,
   lastHeartbeatNanos: Long
 )
 
@@ -32,6 +34,12 @@ object ConsensusError {
   case object NoLeader extends ConsensusError {
     override def getMessage: String = "no leader is currently elected"
   }
+
+  /** Returned when the leader cannot replicate a write to a majority of the cluster. */
+  case object QuorumLost extends ConsensusError {
+    override def getMessage: String = "write could not be replicated to a quorum"
+  }
+
   final case class Serialize(message: String) extends ConsensusError
   final case class Transport(message: String) extends ConsensusError
 }
@@ -42,8 +50,11 @@ final class ProtoConsensusEngine private (
   peersRef: Ref[Map[String, DRefConsensusClient]],
   config: ProtoRaftConfig,
   stateRef: Ref[ConsensusState],
+  pendingRef: Ref[Map[Long, Array[Byte]]],
   voterStore: VoterStateStore,
+  commandLogStore: CommandLogStore,
   persistMutex: Semaphore,
+  logMutex: Semaphore,
   snapshotStore: StateMachineSnapshotStore,
   snapshotMutex: Semaphore,
   appliesSinceSnapshot: Ref[Long]
@@ -92,6 +103,9 @@ final class ProtoConsensusEngine private (
       } yield result
     }
 
+  private def withCommandLog[A](op: CommandLogStore => Task[A]): UIO[A] =
+    logMutex.withPermit(op(commandLogStore).orDie)
+
   /** Record that a command was successfully applied. When the running tally crosses the configured
     * `snapshotEvery` threshold, fork off a snapshot write so the on-disk picture catches up.
     *
@@ -123,6 +137,7 @@ final class ProtoConsensusEngine private (
         st       <- stateRef.get
         snapshot <- stateMachine.takeSnapshot
         _        <- snapshotStore.save(snapshot.copy(lastSeq = st.lastSeq))
+        _        <- withCommandLog(_.truncateThrough(st.commitSeq))
       } yield ()
     }
 
@@ -139,6 +154,47 @@ final class ProtoConsensusEngine private (
     */
   def currentTerm: UIO[Long] = stateRef.get.map(_.term)
 
+  /** Apply pending entries up to `commitSeq` and advance the committed/applied markers. */
+  private def applyCommitted(commitSeq: Long): UIO[Unit] =
+    stateRef.get.flatMap { st =>
+      if commitSeq <= st.commitSeq then ZIO.unit
+      else
+        ZIO
+          .foldLeft((st.lastApplied + 1L) to commitSeq)(()) { (_, seq) =>
+            for {
+              pending <- pendingRef.get
+              _       <- pending.get(seq) match {
+                           case Some(value) =>
+                             for {
+                               cmd <- ZIO.attempt(StateCommand.parseFrom(value)).orDie
+                               _   <- stateMachine.apply(cmd)
+                               _   <- noteApplied
+                               _   <- stateRef.update(s => s.copy(lastApplied = seq))
+                               _   <- pendingRef.update(_ - seq)
+                             } yield ()
+                           case None =>
+                             ZIO.logWarning(s"missing pending entry for seq $seq")
+                         }
+            } yield ()
+          }
+          .flatMap(_ =>
+            stateRef.update(_.copy(commitSeq = commitSeq)) *>
+              withCommandLog(_.setCommitSeq(commitSeq))
+          )
+    }
+
+  /** Push the current commit index to every follower so they apply pending entries. */
+  private def propagateCommitSeq(commitSeq: Long, term: Long): UIO[Unit] =
+    peersRef.get.flatMap { peers =>
+      ZIO.foreachParDiscard(peers) { case (_, client) =>
+        client
+          .heartbeat(HeartbeatRequest(leaderId = nodeId, term = term, commitSeq = commitSeq))
+          .foldZIO(_ => ZIO.unit, resp => stepDownIfStale(resp.term))
+      }
+    }
+
+  private def quorumNeeded(peerCount: Int): Int = (peerCount + 1) / 2 + 1
+
   def submit(cmd: StateCommand): IO[ConsensusError, ApplyResult] =
     for {
       termAndSeq <- stateRef
@@ -146,24 +202,67 @@ final class ProtoConsensusEngine private (
                         if st.role != Role.Leader then (Left(ConsensusError.NotLeader(st.leaderId)), st)
                         else
                           val next = st.copy(lastSeq = st.lastSeq + 1)
-                          (Right((next.term, next.lastSeq)), next)
+                          (Right((next.term, next.lastSeq, next.commitSeq)), next)
                       }
                       .flatMap {
                         case Left(err)   => ZIO.fail(err)
-                        case Right(pair) => ZIO.succeed(pair)
+                        case Right(trip) => ZIO.succeed(trip)
                       }
-      (term, seq) = termAndSeq
-      bytes       = cmd.toByteArray
-      result     <- stateMachine.apply(cmd)
-      _          <- noteApplied
-      _          <- replicate(term, seq, bytes).forkDaemon.unit
+      (term, seq, commitSeqBefore) = termAndSeq
+      bytes                        = cmd.toByteArray
+      _                           <- withCommandLog(_.append(seq, bytes))
+      peers                       <- peersRef.get
+      needed                       = quorumNeeded(peers.size)
+      followerAcks                <- replicateForQuorum(term, seq, bytes, commitSeqBefore)
+      totalAcks                    = 1 + followerAcks
+      _                           <- ZIO.when(totalAcks < needed) {
+                                       withCommandLog(_.truncateThrough(seq - 1)) *>
+                                         stateRef.update(_.copy(lastSeq = seq - 1)) *>
+                                         ZIO.fail(ConsensusError.QuorumLost)
+                                     }
+      stillLeader                 <- isLeader
+      _                           <- ZIO.fail(ConsensusError.NotLeader(None)).when(!stillLeader)
+      result                      <- stateMachine.apply(cmd)
+      _                           <- noteApplied
+      _                           <- stateRef.update(s => s.copy(commitSeq = seq, lastApplied = seq))
+      _                           <- withCommandLog(_.setCommitSeq(seq))
+      _                           <- propagateCommitSeq(seq, term)
     } yield result
+
+  /** Confirm leadership with a quorum before serving a linearizable read. */
+  def readIndex: IO[ConsensusError, Unit] =
+    for {
+      st <- stateRef.get
+      _  <- ZIO.fail(ConsensusError.NotLeader(st.leaderId)).when(st.role != Role.Leader)
+      peers     <- peersRef.get
+      needed     = quorumNeeded(peers.size)
+      responses <- ZIO.foreachPar(peers.toList) { case (peerId, client) =>
+                     client
+                       .readIndex(ReadIndexRequest(leaderId = nodeId, term = st.term))
+                       .map(Some(_))
+                       .catchAll { _ =>
+                         ZIO.logDebug(s"read-index request failed for peer $peerId") *> ZIO.none
+                       }
+                   }
+      higherTerm = responses.flatten.collect { case resp if resp.term > st.term => resp.term }.headOption
+      _         <- higherTerm match {
+                     case Some(newTerm) => stepDownIfStale(newTerm) *> ZIO.fail(ConsensusError.NotLeader(None))
+                     case None          =>
+                       val grants = 1 + responses.flatten.count(_.granted)
+                       ZIO.fail(ConsensusError.NotLeader(st.leaderId)).when(grants < needed).unit
+                   }
+      applied <- stateRef.get.map(_.lastApplied)
+      _       <- ZIO
+                   .fail(ConsensusError.NotLeader(st.leaderId))
+                   .when(applied < st.commitSeq)
+    } yield ()
 
   def handleAppendEntries(
     leaderId: String,
     term: Long,
     seq: Long,
-    command: Array[Byte]
+    command: Array[Byte],
+    commitSeq: Long
   ): UIO[(Boolean, Long)] =
     for {
       updated                <- updateAndPersist { st =>
@@ -183,30 +282,37 @@ final class ProtoConsensusEngine private (
       (accepted, currentTerm) = updated
       result                 <-
         if accepted then
-          ZIO
-            .attempt(StateCommand.parseFrom(command))
-            .flatMap(stateMachine.apply)
-            .foldZIO(
-              _ => ZIO.succeed(false),
-              _ => noteApplied.as(true)
-            )
-            .map(ok => (ok, currentTerm))
+          withCommandLog(_.append(seq, command)) *>
+            pendingRef.update(_ + (seq -> command)) *>
+            applyCommitted(commitSeq).as((true, currentTerm))
         else ZIO.succeed((false, currentTerm))
     } yield result
 
-  def handleHeartbeat(leaderId: String, term: Long): UIO[(Boolean, Long)] =
-    updateAndPersist { st =>
-      if term < st.term then ((false, st.term), st)
-      else
-        val stepped =
-          if term > st.term then st.copy(term = term, votedFor = None)
-          else st
-        val next = stepped.copy(
-          role = Role.Follower,
-          leaderId = Some(leaderId),
-          lastHeartbeatNanos = java.lang.System.nanoTime()
-        )
-        ((true, next.term), next)
+  def handleHeartbeat(leaderId: String, term: Long, commitSeq: Long): UIO[(Boolean, Long)] =
+    for {
+      updated <- updateAndPersist { st =>
+                   if term < st.term then ((false, st.term), st)
+                   else
+                     val stepped =
+                       if term > st.term then st.copy(term = term, votedFor = None)
+                       else st
+                     val next = stepped.copy(
+                       role = Role.Follower,
+                       leaderId = Some(leaderId),
+                       lastHeartbeatNanos = java.lang.System.nanoTime()
+                     )
+                     ((true, next.term), next)
+                 }
+      (acknowledged, currentTerm) = updated
+      _                          <- applyCommitted(commitSeq).when(acknowledged)
+    } yield (acknowledged, currentTerm)
+
+  /** Follower ack for a ReadIndex probe — confirms the requester is still the leader we know. */
+  def handleReadIndex(leaderId: String, term: Long): UIO[(Boolean, Long)] =
+    stateRef.get.map { st =>
+      if term < st.term then (false, st.term)
+      else if st.leaderId.contains(leaderId) && term == st.term then (true, st.term)
+      else (false, st.term)
     }
 
   /** Handle a PreVote request (Ongaro thesis §9.6).
@@ -289,7 +395,12 @@ final class ProtoConsensusEngine private (
                                     // applies-counter and durably re-write the snapshot so a restart picks up the
                                     // freshly-received state instead of the leader's stale `lastSeq` gap.
                                     val durableSnapshot = snapshot.copy(lastSeq = lastSeq)
-                                    stateMachine.installSnapshot(durableSnapshot) *>
+                                    withCommandLog(_.truncateThrough(lastSeq)) *>
+                                      pendingRef.set(Map.empty) *>
+                                      stateMachine.installSnapshot(durableSnapshot) *>
+                                      stateRef.update(
+                                        _.copy(commitSeq = lastSeq, lastApplied = lastSeq)
+                                      ) *>
                                       appliesSinceSnapshot.set(0L) *>
                                       persistSnapshotInBackground
                                   }
@@ -298,32 +409,34 @@ final class ProtoConsensusEngine private (
   def spawnDrivers: UIO[Fiber.Runtime[Throwable, Nothing]] =
     driverLoop.forever.forkDaemon
 
-  private def replicate(term: Long, seq: Long, command: Array[Byte]): UIO[Unit] =
+  /** Replicate one entry and return the number of follower acks received. */
+  private def replicateForQuorum(
+    term: Long,
+    seq: Long,
+    command: Array[Byte],
+    commitSeq: Long
+  ): UIO[Int] =
     peersRef.get.flatMap { peers =>
-      ZIO.foreachParDiscard(peers) { case (peerId, client) =>
+      ZIO.foreachPar(peers.toList) { case (peerId, client) =>
         client
           .appendEntries(
             AppendEntriesRequest(
               leaderId = nodeId,
               term = term,
               command = ByteString.copyFrom(command),
-              seq = seq
+              seq = seq,
+              commitSeq = commitSeq
             )
           )
           .foldZIO(
-            _ => ZIO.unit,
+            _ => ZIO.succeed(false),
             resp =>
               stepDownIfStale(resp.term) *>
-                // A follower whose lastSeq diverges from ours rejects with
-                // success=false; without a catch-up the strict seq check keeps
-                // refusing every subsequent entry until a new election. Push a
-                // snapshot to bring them in sync as long as we're still the
-                // leader at this term.
                 ZIO.when(!resp.success && resp.term <= term) {
                   sendSnapshotTo(peerId, client)
-                }
+                }.as(resp.success)
           )
-      }
+      }.map(_.count(identity))
     }
 
   private def sendSnapshotTo(peerId: String, client: DRefConsensusClient): UIO[Unit] =
@@ -371,9 +484,9 @@ final class ProtoConsensusEngine private (
   private def sendHeartbeats: UIO[Unit] =
     stateRef.get.flatMap { st =>
       peersRef.get.flatMap { peers =>
-        ZIO.foreachParDiscard(peers) { case (peerId, client) =>
+        ZIO.foreachParDiscard(peers) { case (_, client) =>
           client
-            .heartbeat(HeartbeatRequest(leaderId = nodeId, term = st.term))
+            .heartbeat(HeartbeatRequest(leaderId = nodeId, term = st.term, commitSeq = st.commitSeq))
             .foldZIO(
               _ => ZIO.unit,
               resp => stepDownIfStale(resp.term)
@@ -540,12 +653,30 @@ object ProtoConsensusEngine {
                           case Some(path) => StateMachineSnapshotStore.file(path)
                           case None       => ZIO.succeed(StateMachineSnapshotStore.noop)
                         }
+      commandLogStore <- config.storageDir match {
+                          case Some(path) => CommandLogStore.file(path)
+                          case None       => ZIO.succeed(CommandLogStore.noop)
+                        }
       // Hydrate the state machine BEFORE peers come online so we don't serve
       // empty reads or accept appends against a stale lastSeq baseline. If the
       // snapshot file is corrupt or unreadable we fail-fast — silently booting
       // empty would diverge this node from the rest of the cluster.
       persisted      <- snapshotStore.load
       _              <- ZIO.foreachDiscard(persisted)(stateMachine.installSnapshot)
+      snapshotLastSeq = persisted.fold(0L)(_.lastSeq)
+      logState       <- commandLogStore.load
+      maxLogSeq       = logState.entries.keys.maxOption.getOrElse(0L)
+      recoveredCommit = math.min(logState.commitSeq, maxLogSeq)
+      initialCommitSeq = math.max(snapshotLastSeq, recoveredCommit)
+      initialLastSeq   = math.max(snapshotLastSeq, maxLogSeq)
+      _              <- ZIO.foreachDiscard((snapshotLastSeq + 1L) to initialCommitSeq) { seq =>
+                          logState.entries.get(seq) match {
+                            case Some(bytes) =>
+                              ZIO.attempt(StateCommand.parseFrom(bytes)).flatMap(stateMachine.apply).orDie
+                            case None        => ZIO.unit
+                          }
+                        }
+      initialPending  = logState.entries.filter { case (s, _) => s > initialCommitSeq }
       loaded         <- voterStore.load
       // When persistent state already exists, never short-circuit to leader:
       // doing so would skip the election protocol and the persisted term/vote
@@ -556,16 +687,20 @@ object ProtoConsensusEngine {
       initialLeader   = if initialRole == Role.Leader then Some(nodeId) else None
       initialTerm     = if initialRole == Role.Leader then 1L else loaded.term
       initialVotedFor = if initialRole == Role.Leader then None else loaded.votedFor
+      restoredSeq     = initialLastSeq
       stateRef       <- Ref.make(
                           ConsensusState(
                             role = initialRole,
                             term = initialTerm,
                             votedFor = initialVotedFor,
                             leaderId = initialLeader,
-                            lastSeq = persisted.fold(0L)(_.lastSeq),
+                            lastSeq = restoredSeq,
+                            commitSeq = initialCommitSeq,
+                            lastApplied = initialCommitSeq,
                             lastHeartbeatNanos = java.lang.System.nanoTime()
                           )
                         )
+      pendingRef     <- Ref.make(initialPending)
       // If we took the single-node leader shortcut, fsync the bootstrap term
       // immediately so a crash before the first election still leaves us at
       // a term we can compare against on restart.
@@ -573,6 +708,7 @@ object ProtoConsensusEngine {
                           .save(VoterState(initialTerm, initialVotedFor))
                           .when(initialTerm != loaded.term || initialVotedFor != loaded.votedFor)
       persistMutex   <- Semaphore.make(1)
+      logMutex       <- Semaphore.make(1)
       snapshotMutex  <- Semaphore.make(1)
       appliesRef     <- Ref.make(0L)
       peersRef       <- Ref.make(peers)
@@ -582,8 +718,11 @@ object ProtoConsensusEngine {
       peersRef,
       config,
       stateRef,
+      pendingRef,
       voterStore,
+      commandLogStore,
       persistMutex,
+      logMutex,
       snapshotStore,
       snapshotMutex,
       appliesRef
