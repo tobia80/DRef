@@ -93,11 +93,12 @@ object CommandLogStore {
         if !Files.exists(target) then ()
         else {
           val in = new DataInputStream(new FileInputStream(target.toFile))
-          val (commitSeq, entries) =
+          val loaded =
             try readLog(in)
+            catch case _: EOFException => throw new IOException(s"command-log file truncated: $target")
             finally in.close()
-          val kept = entries.filter { case (seq, _) => seq > throughSeq }
-          val newCommit = math.min(commitSeq, throughSeq)
+          val kept = loaded.entries.filter { case (seq, _) => seq > throughSeq }
+          val newCommit = math.min(loaded.commitSeq, throughSeq)
           rewrite(newCommit, kept)
         }
       }

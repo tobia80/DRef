@@ -51,6 +51,7 @@ fn append_entries_carries_protobuf_state_command() {
         term: 7,
         command,
         seq: 99,
+        commit_seq: 42,
     };
     let encoded = req.encode_to_vec();
     let decoded = AppendEntriesRequest::decode(encoded.as_slice()).expect("decode");

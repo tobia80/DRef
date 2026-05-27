@@ -100,7 +100,7 @@ object ProtoConsensusPersistenceSpec extends ZIOSpecDefault {
       for {
         dir       <- tempDir
         engine    <- makeEngine(Some(dir))
-        _         <- engine.handleAppendEntries(leaderId = "leader-x", term = 12L, seq = 0L, command = Array.emptyByteArray)
+        _         <- engine.handleAppendEntries(leaderId = "leader-x", term = 12L, seq = 0L, command = Array.emptyByteArray, commitSeq = 0L)
         verifier  <- VoterStateStore.file(dir)
         persisted <- verifier.load
       } yield assertTrue(
@@ -179,7 +179,7 @@ object ProtoConsensusPersistenceSpec extends ZIOSpecDefault {
         dir       <- tempDir
         engine    <- makeEngine(Some(dir))
         // Move into Follower at term=2 via AppendEntries.
-        _         <- engine.handleAppendEntries(leaderId = "x", term = 2L, seq = 0L, command = Array.emptyByteArray)
+        _         <- engine.handleAppendEntries(leaderId = "x", term = 2L, seq = 0L, command = Array.emptyByteArray, commitSeq = 0L)
         result    <- engine.handlePreVote(candidateId = "candidate-x", term = 99L, lastSeq = 0L)
         verifier  <- VoterStateStore.file(dir)
         persisted <- verifier.load
@@ -192,7 +192,7 @@ object ProtoConsensusPersistenceSpec extends ZIOSpecDefault {
     test("handlePreVote refuses when a leader heartbeat is recent") {
       for {
         engine <- makeEngine(None)
-        _      <- engine.handleHeartbeat("leader-x", term = 1L)
+        _      <- engine.handleHeartbeat("leader-x", term = 1L, commitSeq = 0L)
         result <- engine.handlePreVote(candidateId = "disruptor", term = 50L, lastSeq = 0L)
       } yield assertTrue(
         !result._1,             // refused: leader was fresh
@@ -202,7 +202,7 @@ object ProtoConsensusPersistenceSpec extends ZIOSpecDefault {
     test("handlePreVote refuses when proposed term is not strictly greater") {
       for {
         engine <- makeEngine(None)
-        _      <- engine.handleAppendEntries(leaderId = "x", term = 5L, seq = 0L, command = Array.emptyByteArray)
+        _      <- engine.handleAppendEntries(leaderId = "x", term = 5L, seq = 0L, command = Array.emptyByteArray, commitSeq = 0L)
         equal  <- engine.handlePreVote(candidateId = "c", term = 5L, lastSeq = 0L)
         lower  <- engine.handlePreVote(candidateId = "c", term = 4L, lastSeq = 0L)
       } yield assertTrue(!equal._1, !lower._1)
@@ -292,6 +292,19 @@ object ProtoConsensusPersistenceSpec extends ZIOSpecDefault {
       } yield assertTrue(
         loaded.flatten.exists(_.entries.exists(_.key == "auto"))
       )
+    },
+    test("restarted engine replays committed command log entries not yet snapshotted") {
+      for {
+        dir   <- tempDir
+        _     <- ZIO.scoped {
+                   makeEngineWithMachine(Some(dir), snapshotEvery = 0).flatMap { case (_, engine) =>
+                     engine.submit(setElement("from-wal", Array[Byte](9))).either
+                   }
+                 }
+        pair  <- makeEngineWithMachine(Some(dir), snapshotEvery = 0)
+        (sm2, _) = pair
+        value <- sm2.get("from-wal")
+      } yield assertTrue(value.exists(_.toSeq == Seq[Byte](9)))
     },
     test("snapshotEvery=0 disables automatic snapshots") {
       for {

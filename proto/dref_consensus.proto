@@ -26,6 +26,9 @@ message AppendEntriesRequest {
   bytes command = 3;
   // Monotonic sequence number for ordering and deduplication.
   uint64 seq = 4;
+  // Highest sequence known committed on a majority. Followers apply stored
+  // entries up to this index but never beyond.
+  uint64 commit_seq = 5;
 }
 
 message AppendEntriesResponse {
@@ -35,6 +38,18 @@ message AppendEntriesResponse {
 
 message HeartbeatRequest {
   string leader_id = 1;
+  uint64 term = 2;
+  // Propagates the leader's commit index so followers apply pending entries.
+  uint64 commit_seq = 3;
+}
+
+message ReadIndexRequest {
+  string leader_id = 1;
+  uint64 term = 2;
+}
+
+message ReadIndexResponse {
+  bool granted = 1;
   uint64 term = 2;
 }
 
@@ -88,6 +103,7 @@ message InstallSnapshotResponse {
 service DRefConsensus {
   rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse) {}
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse) {}
+  rpc ReadIndex(ReadIndexRequest) returns (ReadIndexResponse) {}
   rpc RequestVote(VoteRequest) returns (VoteResponse) {}
   rpc RequestPreVote(PreVoteRequest) returns (PreVoteResponse) {}
   rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse) {}

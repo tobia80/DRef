@@ -1,32 +1,22 @@
-//! Simplified Raft-style consensus.
+//! Raft-style consensus with quorum commit and linearizable reads.
 //!
-//! This is the "simple in-memory consensus wrapper" called out as acceptable
-//! in the task spec when openraft's API turns out to be too involved for the
-//! scope of this port. It is intentionally a small fraction of what
-//! production Raft does — but it nails the things `dref-raft` actually
-//! needs:
+//! This is a pragmatic in-memory Raft implementation for replicated locks
+//! and short-lived shared state. It provides:
 //!
-//! - a single leader is elected via term-based voting,
-//! - all writes go through the leader,
-//! - the leader replicates each committed command to every reachable
-//!   follower via gRPC `AppendEntries`,
-//! - followers detect leader loss via heartbeat timeout and start a new
-//!   election,
-//! - a new leader replays its snapshot to followers that fell behind.
+//! - term-based leader election with PreVote,
+//! - quorum-committed writes (ack only after majority replication),
+//! - ReadIndex-style linearizable reads on the leader,
+//! - snapshot catch-up for lagging followers.
 //!
-//! Things this does NOT do (relative to "real" Raft):
-//! - no persistent log: commands are applied in memory only,
-//! - no log truncation on conflict (we only ever replicate from the
-//!   current leader's state, snapshot-style),
-//! - membership is refreshed when an [`IpProvider`] is configured (DNS /
-//!   k8s polling updates peers via [`Consensus::sync_peers`]).
-//!
-//! These limits are fine for the role this crate plays: replicated locks
-//! and short-lived shared state across a fixed-size cluster. They also map
-//! cleanly onto a future swap to a real Raft implementation: the public
-//! [`Consensus`] API doesn't expose anything that would change.
+//! Relative to full Raft (Ongaro §5–§7):
+//! - append-only command log (`command-log`, magic DRFL) fsync'd before
+//!   replication acks; truncated when snapshots catch up,
+//! - no log truncation on conflict (strict monotonic `seq` + snapshot
+//!   install for divergence),
+//! - membership refreshed via [`Consensus::sync_peers`] when an
+//!   [`IpProvider`] is configured.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,11 +26,14 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Instant};
 use tracing::{debug, info, warn};
 
+use crate::command_log_store::{
+    CommandLogStore, FileCommandLogStore, NoopCommandLogStore,
+};
 use crate::config::{NodeEndpoint, RaftConfig};
 use crate::proto::dref_consensus::d_ref_consensus_client::DRefConsensusClient;
 use crate::proto::dref_consensus::{
     AppendEntriesRequest, ClusterSnapshot, HeartbeatRequest, InstallSnapshotRequest,
-    PreVoteRequest, VoteRequest,
+    PreVoteRequest, ReadIndexRequest, VoteRequest,
 };
 use crate::state_command::{self, StateCommand};
 use crate::state_machine::{ApplyResult, StateMachine};
@@ -69,6 +62,8 @@ pub enum ConsensusError {
     NotLeader { leader_id: Option<String> },
     #[error("no leader is currently elected")]
     NoLeader,
+    #[error("write could not be replicated to a quorum")]
+    QuorumLost,
     #[error("serialization failure: {0}")]
     Serialize(String),
     #[error("transport failure: {0}")]
@@ -122,10 +117,12 @@ struct ConsensusState {
     voted_for: Option<String>,
     /// Last known leader id (informational; used by `NotLeader` errors).
     leader_id: Option<String>,
-    /// Monotonic sequence number of the last committed command. Followers
-    /// reject AppendEntries with an out-of-order seq, which lets a new
-    /// leader notice it needs to ship a snapshot.
+    /// Monotonic sequence number of the last replicated command.
     last_seq: u64,
+    /// Highest sequence known committed on a majority.
+    commit_seq: u64,
+    /// Highest sequence applied to the state machine.
+    last_applied: u64,
     /// When we last heard from the leader. Used to drive election timeout.
     last_heartbeat: Instant,
 }
@@ -137,9 +134,12 @@ pub struct Consensus {
     peers: Arc<RwLock<HashMap<String, Arc<PeerConn>>>>,
     pub state_machine: StateMachine,
     state: Arc<RwLock<ConsensusState>>,
+    pending: Arc<RwLock<BTreeMap<u64, Vec<u8>>>>,
+    command_log_store: StdArc<dyn CommandLogStore>,
     config: RaftConfig,
     voter_store: StdArc<dyn VoterStateStore>,
     persist_mutex: Arc<Mutex<()>>,
+    log_mutex: Arc<Mutex<()>>,
     snapshot_store: StdArc<dyn StateMachineSnapshotStore>,
     snapshot_mutex: Arc<Mutex<()>>,
     applies_since_snapshot: Arc<std::sync::atomic::AtomicU64>,
@@ -165,12 +165,38 @@ impl Consensus {
             ),
             None => StdArc::new(NoopStateMachineSnapshotStore),
         };
+        let command_log_store: StdArc<dyn CommandLogStore> = match &config.storage_dir {
+            Some(dir) => {
+                StdArc::new(FileCommandLogStore::open(dir).expect("create command-log storage directory"))
+            }
+            None => StdArc::new(NoopCommandLogStore),
+        };
         let persisted = snapshot_store
             .load()
             .expect("load persisted state-machine snapshot");
         if let Some(snapshot) = persisted.clone() {
             state_machine.install_snapshot(snapshot).await;
         }
+        let snapshot_last_seq = persisted.as_ref().map(|s| s.last_seq).unwrap_or(0);
+        let log_state = command_log_store
+            .load()
+            .expect("load persisted command log");
+        let max_log_seq = log_state.entries.keys().max().copied().unwrap_or(0);
+        let recovered_commit = log_state.commit_seq.min(max_log_seq);
+        let initial_commit_seq = snapshot_last_seq.max(recovered_commit);
+        let initial_last_seq = snapshot_last_seq.max(max_log_seq);
+        for seq in (snapshot_last_seq + 1)..=initial_commit_seq {
+            if let Some(bytes) = log_state.entries.get(&seq) {
+                if let Ok(cmd) = state_command::decode(bytes) {
+                    state_machine.apply(cmd).await;
+                }
+            }
+        }
+        let initial_pending: BTreeMap<u64, Vec<u8>> = log_state
+            .entries
+            .into_iter()
+            .filter(|(seq, _)| *seq > initial_commit_seq)
+            .collect();
         let loaded = voter_store.load().expect("load persisted voter state");
         let mut peers = HashMap::new();
         for ep in &config.initial_endpoints {
@@ -218,16 +244,29 @@ impl Consensus {
                 term: initial_term,
                 voted_for: initial_voted_for,
                 leader_id,
-                last_seq: persisted.as_ref().map(|s| s.last_seq).unwrap_or(0),
+                last_seq: initial_last_seq,
+                commit_seq: initial_commit_seq,
+                last_applied: initial_commit_seq,
                 last_heartbeat: Instant::now(),
             })),
+            pending: Arc::new(RwLock::new(initial_pending)),
+            command_log_store,
             config,
             voter_store,
             persist_mutex: Arc::new(Mutex::new(())),
+            log_mutex: Arc::new(Mutex::new(())),
             snapshot_store,
             snapshot_mutex: Arc::new(Mutex::new(())),
             applies_since_snapshot: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    async fn with_command_log<F, R>(&self, op: F) -> R
+    where
+        F: FnOnce(&dyn CommandLogStore) -> R,
+    {
+        let _guard = self.log_mutex.lock().await;
+        op(self.command_log_store.as_ref())
     }
 
     /// Align the consensus peer map with the current discovery snapshot.
@@ -258,6 +297,8 @@ impl Consensus {
             voted_for: st.voted_for.clone(),
             leader_id: st.leader_id.clone(),
             last_seq: st.last_seq,
+            commit_seq: st.commit_seq,
+            last_applied: st.last_applied,
             last_heartbeat: st.last_heartbeat,
         };
         let (result, next) = f(current);
@@ -306,12 +347,18 @@ impl Consensus {
     /// triggers don't both write — the second waits, then takes a fresh snapshot itself.
     async fn persist_snapshot_now(&self) -> Result<(), String> {
         let _guard = self.snapshot_mutex.lock().await;
+        let commit_seq = self.state.read().await.commit_seq;
         let last_seq = self.state.read().await.last_seq;
         let mut snapshot = self.state_machine.take_snapshot().await;
         snapshot.last_seq = last_seq;
         self.snapshot_store
             .save(&snapshot)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        self.with_command_log(|log| {
+            log.truncate_through(commit_seq)
+                .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     /// Force a snapshot persist now. Exposed for tests and graceful shutdown.
@@ -375,42 +422,55 @@ impl Consensus {
             .map(|p| p.endpoint.address.clone())
     }
 
-    /// Submit a write command. Must be called on the leader; returns
-    /// [`ConsensusError::NotLeader`] otherwise.
-    ///
-    /// On the leader we (1) apply locally, (2) bump `last_seq`, (3) fan
-    /// out to followers in parallel. We do NOT wait for a quorum — every
-    /// follower is "best effort" replication. This is the main divergence
-    /// from real Raft and the reason we call out the simplification at the
-    /// top of this file.
-    pub async fn submit(&self, cmd: StateCommand) -> Result<ApplyResult, ConsensusError> {
-        let (term, seq) = {
-            let mut st = self.state.write().await;
-            if st.role != Role::Leader {
-                return Err(ConsensusError::NotLeader {
-                    leader_id: st.leader_id.clone(),
-                });
-            }
-            st.last_seq += 1;
-            (st.term, st.last_seq)
-        };
-
-        let bytes =
-            state_command::encode(&cmd).map_err(|e| ConsensusError::Serialize(e.to_string()))?;
-        let result = self.state_machine.apply(cmd).await;
-        self.note_applied().await;
-
-        // Fire-and-forget replication. Followers can fall behind; the
-        // periodic snapshot-install during reconnection brings them back.
-        self.replicate(term, seq, bytes).await;
-
-        Ok(result)
+    fn quorum_needed(cluster_size: usize) -> usize {
+        cluster_size / 2 + 1
     }
 
-    /// Replicate one entry to all peers in parallel. Errors are logged but
-    /// don't fail the submit — see top-of-file note on the simplified
-    /// quorum model.
-    async fn replicate(&self, term: u64, seq: u64, command: Vec<u8>) {
+    async fn apply_committed(&self, commit_seq: u64) {
+        let start = {
+            let st = self.state.read().await;
+            if commit_seq <= st.commit_seq {
+                return;
+            }
+            st.last_applied + 1
+        };
+        for seq in start..=commit_seq {
+            let bytes = {
+                let pending = self.pending.read().await;
+                pending.get(&seq).cloned()
+            };
+            let Some(bytes) = bytes else {
+                warn!(seq, commit_seq, "missing pending entry while applying commit");
+                return;
+            };
+            match state_command::decode(&bytes) {
+                Ok(cmd) => {
+                    self.state_machine.apply(cmd).await;
+                    self.note_applied().await;
+                    {
+                        let mut st = self.state.write().await;
+                        st.last_applied = seq;
+                    }
+                    self.pending.write().await.remove(&seq);
+                }
+                Err(e) => {
+                    warn!(error = ?e, seq, "failed to decode pending entry");
+                    return;
+                }
+            }
+        }
+        {
+            let mut st = self.state.write().await;
+            if commit_seq > st.commit_seq {
+                st.commit_seq = commit_seq;
+            }
+        }
+        let _ = self
+            .with_command_log(|log| log.set_commit_seq(commit_seq))
+            .await;
+    }
+
+    async fn propagate_commit_seq(&self, commit_seq: u64, term: u64) {
         let peers: Vec<(String, Arc<PeerConn>)> = self
             .peers
             .read()
@@ -418,13 +478,180 @@ impl Consensus {
             .iter()
             .map(|(id, p)| (id.clone(), Arc::clone(p)))
             .collect();
-        let mut tasks = Vec::new();
+        let mut futs = Vec::new();
+        for (id, peer) in peers {
+            let leader_id = self.node_id.clone();
+            let timeout = self.config.connection_timeout;
+            let this = self.clone();
+            futs.push(tokio::spawn(async move {
+                match peer.client(timeout).await {
+                    Ok(mut client) => {
+                        let req = HeartbeatRequest {
+                            leader_id,
+                            term,
+                            commit_seq,
+                        };
+                        match client.heartbeat(req).await {
+                            Ok(resp) => {
+                                this.step_down_if_stale(resp.into_inner().term).await;
+                            }
+                            Err(e) => {
+                                debug!(peer = %id, error = ?e, "commit heartbeat failed");
+                                peer.reset().await;
+                            }
+                        }
+                    }
+                    Err(e) => debug!(peer = %id, error = ?e, "no client for commit heartbeat"),
+                }
+            }));
+        }
+        for fut in futs {
+            let _ = fut.await;
+        }
+    }
+
+    /// Submit a write command. Must be called on the leader; returns
+    /// [`ConsensusError::NotLeader`] otherwise. The write is acknowledged
+    /// only after a quorum of nodes has stored the entry.
+    pub async fn submit(&self, cmd: StateCommand) -> Result<ApplyResult, ConsensusError> {
+        let (term, seq, commit_seq_before) = {
+            let mut st = self.state.write().await;
+            if st.role != Role::Leader {
+                return Err(ConsensusError::NotLeader {
+                    leader_id: st.leader_id.clone(),
+                });
+            }
+            st.last_seq += 1;
+            (st.term, st.last_seq, st.commit_seq)
+        };
+
+        let bytes =
+            state_command::encode(&cmd).map_err(|e| ConsensusError::Serialize(e.to_string()))?;
+        self.with_command_log(|log| {
+            log.append(seq, &bytes)
+                .map_err(|e| ConsensusError::Serialize(e.to_string()))
+        })
+        .await?;
+        let peers: Vec<(String, Arc<PeerConn>)> = self
+            .peers
+            .read()
+            .await
+            .iter()
+            .map(|(id, p)| (id.clone(), Arc::clone(p)))
+            .collect();
+        let needed = Self::quorum_needed(peers.len() + 1);
+        let follower_acks = self
+            .replicate_for_quorum(term, seq, bytes, commit_seq_before, peers)
+            .await;
+        let total_acks = 1 + follower_acks;
+        if total_acks < needed {
+            let _ = self
+                .with_command_log(|log| log.truncate_through(seq - 1))
+                .await;
+            let mut st = self.state.write().await;
+            st.last_seq = seq - 1;
+            return Err(ConsensusError::QuorumLost);
+        }
+        if !self.is_leader().await {
+            return Err(ConsensusError::NotLeader {
+                leader_id: self.leader_id().await,
+            });
+        }
+
+        let result = self.state_machine.apply(cmd).await;
+        self.note_applied().await;
+        {
+            let mut st = self.state.write().await;
+            st.commit_seq = seq;
+            st.last_applied = seq;
+        }
+        let _ = self
+            .with_command_log(|log| log.set_commit_seq(seq))
+            .await;
+        self.propagate_commit_seq(seq, term).await;
+        Ok(result)
+    }
+
+    /// Confirm leadership with a quorum before serving a linearizable read.
+    pub async fn read_index(&self) -> Result<(), ConsensusError> {
+        let (term, leader_id, commit_seq, last_applied) = {
+            let st = self.state.read().await;
+            if st.role != Role::Leader {
+                return Err(ConsensusError::NotLeader {
+                    leader_id: st.leader_id.clone(),
+                });
+            }
+            (
+                st.term,
+                st.leader_id.clone(),
+                st.commit_seq,
+                st.last_applied,
+            )
+        };
+
+        let peers: Vec<(String, Arc<PeerConn>)> = self
+            .peers
+            .read()
+            .await
+            .iter()
+            .map(|(id, p)| (id.clone(), Arc::clone(p)))
+            .collect();
+        let needed = Self::quorum_needed(peers.len() + 1);
+        let mut grants: usize = 1;
+        let mut futs = Vec::new();
+        for (id, peer) in peers {
+            let leader_id = self.node_id.clone();
+            let timeout = self.config.connection_timeout;
+            futs.push(tokio::spawn(async move {
+                let mut client = peer.client(timeout).await.ok()?;
+                let req = ReadIndexRequest {
+                    leader_id,
+                    term,
+                };
+                match client.read_index(req).await {
+                    Ok(resp) => Some((id, resp.into_inner())),
+                    Err(e) => {
+                        debug!(peer = %id, error = ?e, "read-index request failed");
+                        None
+                    }
+                }
+            }));
+        }
+        for fut in futs {
+            if let Ok(Some((_id, resp))) = fut.await {
+                if resp.term > term {
+                    self.step_down_if_stale(resp.term).await;
+                    return Err(ConsensusError::NotLeader { leader_id: None });
+                }
+                if resp.granted {
+                    grants += 1;
+                }
+            }
+        }
+        if grants < needed {
+            return Err(ConsensusError::NotLeader { leader_id });
+        }
+        if last_applied < commit_seq {
+            return Err(ConsensusError::NotLeader { leader_id: None });
+        }
+        Ok(())
+    }
+
+    async fn replicate_for_quorum(
+        &self,
+        term: u64,
+        seq: u64,
+        command: Vec<u8>,
+        commit_seq: u64,
+        peers: Vec<(String, Arc<PeerConn>)>,
+    ) -> usize {
+        let mut futs = Vec::new();
         for (id, peer) in peers {
             let command = command.clone();
             let leader_id = self.node_id.clone();
             let timeout = self.config.connection_timeout;
             let this = self.clone();
-            tasks.push(tokio::spawn(async move {
+            futs.push(tokio::spawn(async move {
                 match peer.client(timeout).await {
                     Ok(mut client) => {
                         let req = AppendEntriesRequest {
@@ -432,36 +659,38 @@ impl Consensus {
                             term,
                             command,
                             seq,
+                            commit_seq,
                         };
                         match client.append_entries(req).await {
                             Ok(resp) => {
                                 let resp = resp.into_inner();
                                 this.step_down_if_stale(resp.term).await;
-                                // A follower whose last_seq diverges from
-                                // ours rejects with success=false; without a
-                                // catch-up the strict seq check keeps
-                                // refusing every subsequent entry until a new
-                                // election. Push a snapshot to bring them in
-                                // sync as long as we're still leader at this
-                                // term.
                                 if !resp.success && resp.term <= term {
                                     this.send_snapshot_to(&id, &peer).await;
                                 }
+                                resp.success
                             }
                             Err(e) => {
                                 debug!(peer = %id, error = ?e, "AppendEntries failed");
                                 peer.reset().await;
+                                false
                             }
                         }
                     }
                     Err(e) => {
                         debug!(peer = %id, error = ?e, "could not build client");
+                        false
                     }
                 }
             }));
         }
-        // Don't await; tasks finish on their own.
-        drop(tasks);
+        let mut acks = 0usize;
+        for fut in futs {
+            if let Ok(true) = fut.await {
+                acks += 1;
+            }
+        }
+        acks
     }
 
     async fn send_snapshot_to(&self, peer_id: &str, peer: &Arc<PeerConn>) {
@@ -497,15 +726,16 @@ impl Consensus {
 
     // --- Handlers for inbound RPCs (called by the gRPC server) --------------
 
-    /// Handle an incoming AppendEntries from a leader. Apply the command if
-    /// the term is fresh enough; otherwise reject. Out-of-order seq returns
-    /// `success=false` so the leader can ship a snapshot.
+    /// Handle an incoming AppendEntries from a leader. Stores the command
+    /// in the pending buffer and applies it once the leader's commit index
+    /// covers this sequence.
     pub async fn handle_append_entries(
         &self,
         leader_id: String,
         term: u64,
         seq: u64,
         command: Vec<u8>,
+        commit_seq: u64,
     ) -> (bool, u64) {
         let (accepted, current_term) = self
             .update_and_persist(|mut st| {
@@ -531,36 +761,59 @@ impl Consensus {
             return (false, current_term);
         }
 
-        match state_command::decode(&command) {
-            Ok(cmd) => {
-                self.state_machine.apply(cmd).await;
-                self.note_applied().await;
-                (true, current_term)
-            }
-            Err(e) => {
-                warn!(error = ?e, "failed to decode AppendEntries payload");
-                (false, current_term)
-            }
+        if self
+            .with_command_log(|log| log.append(seq, &command))
+            .await
+            .is_err()
+        {
+            return (false, current_term);
         }
+        self.pending.write().await.insert(seq, command);
+        self.apply_committed(commit_seq).await;
+        (true, current_term)
     }
 
-    /// Handle an incoming heartbeat. Updates `last_heartbeat` and
-    /// learns about the current leader; never changes data.
-    pub async fn handle_heartbeat(&self, leader_id: String, term: u64) -> (bool, u64) {
-        self.update_and_persist(|mut st| {
-            if term < st.term {
-                return ((false, st.term), st);
-            }
-            if term > st.term {
-                st.term = term;
-                st.voted_for = None;
-            }
-            st.role = Role::Follower;
-            st.leader_id = Some(leader_id);
-            st.last_heartbeat = Instant::now();
-            ((true, st.term), st)
-        })
-        .await
+    /// Handle an incoming heartbeat. Updates `last_heartbeat`, learns about
+    /// the current leader, and applies any newly committed entries.
+    pub async fn handle_heartbeat(
+        &self,
+        leader_id: String,
+        term: u64,
+        commit_seq: u64,
+    ) -> (bool, u64) {
+        let (acknowledged, current_term) = self
+            .update_and_persist(|mut st| {
+                if term < st.term {
+                    return ((false, st.term), st);
+                }
+                if term > st.term {
+                    st.term = term;
+                    st.voted_for = None;
+                }
+                st.role = Role::Follower;
+                st.leader_id = Some(leader_id);
+                st.last_heartbeat = Instant::now();
+                ((true, st.term), st)
+            })
+            .await;
+
+        if acknowledged {
+            self.apply_committed(commit_seq).await;
+        }
+        (acknowledged, current_term)
+    }
+
+    /// Follower ack for a ReadIndex probe — confirms the requester is still
+    /// the leader we know.
+    pub async fn handle_read_index(&self, leader_id: String, term: u64) -> (bool, u64) {
+        let st = self.state.read().await;
+        if term < st.term {
+            return (false, st.term);
+        }
+        if st.leader_id.as_deref() == Some(leader_id.as_str()) && term == st.term {
+            return (true, st.term);
+        }
+        (false, st.term)
     }
 
     /// Handle a PreVote request. PreVote (Ongaro thesis §9.6) is a
@@ -670,9 +923,18 @@ impl Consensus {
             // rather than the leader's stale `last_seq` gap.
             let mut durable_snapshot = snapshot;
             durable_snapshot.last_seq = last_seq;
+            let _ = self
+                .with_command_log(|log| log.truncate_through(last_seq))
+                .await;
+            self.pending.write().await.clear();
             self.state_machine
                 .install_snapshot(durable_snapshot.clone())
                 .await;
+            {
+                let mut st = self.state.write().await;
+                st.commit_seq = last_seq;
+                st.last_applied = last_seq;
+            }
             self.applies_since_snapshot
                 .store(0, std::sync::atomic::Ordering::Relaxed);
             let this = self.clone();
@@ -726,9 +988,9 @@ impl Consensus {
     }
 
     async fn send_heartbeats(&self) {
-        let (term, last_seq) = {
+        let (term, commit_seq) = {
             let st = self.state.read().await;
-            (st.term, st.last_seq)
+            (st.term, st.commit_seq)
         };
         let peers: Vec<(String, Arc<PeerConn>)> = self
             .peers
@@ -740,7 +1002,6 @@ impl Consensus {
         for (id, peer) in peers {
             let leader_id = self.node_id.clone();
             let timeout = self.config.connection_timeout;
-            let last_seq_for_peer = last_seq;
             let this = self.clone();
             tokio::spawn(async move {
                 match peer.client(timeout).await {
@@ -748,6 +1009,7 @@ impl Consensus {
                         let req = HeartbeatRequest {
                             leader_id: leader_id.clone(),
                             term,
+                            commit_seq,
                         };
                         match client.heartbeat(req).await {
                             Ok(resp) => {
@@ -758,12 +1020,6 @@ impl Consensus {
                                 peer.reset().await;
                             }
                         }
-                        // Best-effort: also probe with an empty AppendEntries
-                        // so a follower that fell behind during a partition
-                        // can pick the next seq back up. If the follower's
-                        // seq is wrong, the leader will catch it via the
-                        // periodic snapshot push below.
-                        let _ = last_seq_for_peer;
                     }
                     Err(e) => debug!(peer = %id, error = ?e, "no client"),
                 }

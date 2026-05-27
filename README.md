@@ -221,6 +221,17 @@ ProtoRaftConfig(
 )
 ```
 
+**On-disk layout (per node):**
+
+```
+{storageDir}/
+  voter-state          # DRFT — term + votedFor
+  state-snapshot       # DRFS — full ClusterSnapshot
+  command-log          # DRFL — append-only log + commit index
+```
+
+The command log is fsync'd **before** a replication ack counts toward quorum. After a state-machine snapshot is written, entries at or below the commit index are truncated from the log.
+
 If `storageDir` is `None` (the default), the node keeps voter state and
 snapshots in memory only. That is fine for single-process tests but unsafe for
 multi-node clusters: a node that restarts without persistent `votedFor` can
@@ -228,19 +239,32 @@ grant a second vote in the same term, and a node that restarts without a
 snapshot must be reseeded by the leader. Deploy multi-node Raft clusters with a
 per-node PersistentVolumeClaim (or equivalent) rather than a plain `Deployment`.
 
-Snapshots are full state-machine images, not durable Raft log segments. The
-current consensus engine uses monotonic sequence numbers and `InstallSnapshot`
-catch-up instead of maintaining a persistent command log, so there is no log to
-truncate. This keeps restart and lagging-follower recovery bounded in the
-current simplified model, but it is not a full Raft §7 log-compaction
-implementation.
+Snapshots are full state-machine images. The command log (`DRFL`) holds
+entries not yet covered by a snapshot; it is truncated after each snapshot
+write. Lagging followers are caught up via `InstallSnapshot` rather than
+log replay from arbitrary indices.
 
 The on-disk voter-state format is shared with the Rust port (magic `DRFT`,
 big-endian fields, atomic rename + `fsync` on every write); see
 [`compat/voter_state_vectors.json`](compat/voter_state_vectors.json). The
 state-machine snapshot format is shared as well (magic `DRFS`, protobuf
 `ClusterSnapshot`, atomic rename + `fsync`); see
-[`compat/snapshot_vectors.json`](compat/snapshot_vectors.json).
+[`compat/snapshot_vectors.json`](compat/snapshot_vectors.json). The
+command-log format is shared as well (magic `DRFL`, big-endian header +
+records, append + fsync); see
+[`compat/command_log_vectors.json`](compat/command_log_vectors.json).
+
+## Raft consistency guarantees
+
+| Operation | Guarantee |
+|-----------|-----------|
+| **Write** (`set`, `delete`, …) | **Linearizable write**: the leader responds only after the entry is stored on a **majority** of nodes. If fewer than a quorum are reachable, the write fails with `quorum-lost`. |
+| **Read** (`get`) | **Linearizable read**: routed to the leader, which confirms leadership with a **ReadIndex** quorum probe before serving from committed state. Followers reject reads (`NotLeader`). |
+| **Change stream** | **Eventual** on each node: followers apply committed entries after the leader propagates the commit index (typically immediately after each write). |
+
+Writes and reads both require a healthy quorum. A partitioned leader cannot commit new writes or serve linearizable reads once it can no longer reach a majority.
+
+The engine persists an append-only command log (`command-log`, magic `DRFL`) before counting replication acks toward quorum. Durability across leader restart combines the log with state-machine snapshots and the shared voter-state file; the log is truncated when snapshots catch up.
 
 ## Cross-language compatibility
 
@@ -253,6 +277,7 @@ layer or sidecar is required.
 | **Core values & locks** | MsgPack codec (`rmp-serde` / `zio-schema-msg-pack`), 8-byte big-endian lock tokens | [`compat/vectors.json`](compat/vectors.json), `CrossLangCompatSpec` (Scala), `compat_tests` (Rust) |
 | **Raft state commands** | [`proto/state_command.proto`](proto/state_command.proto) | [`compat/consensus_vectors.json`](compat/consensus_vectors.json), `CrossLangConsensusCompatSpec` (Scala), `consensus_compat_tests` (Rust) |
 | **Raft snapshots** | `ClusterSnapshot` in [`proto/dref_consensus.proto`](proto/dref_consensus.proto), plus the shared on-disk wrapper | [`compat/snapshot_vectors.json`](compat/snapshot_vectors.json), `StateMachineSnapshotStoreSpec` (Scala), `crosslang_snapshot_tests` (Rust) |
+| **Raft command log** | On-disk `command-log` file (magic `DRFL`) | [`compat/command_log_vectors.json`](compat/command_log_vectors.json), `CommandLogStoreSpec` (Scala), `crosslang_command_log_tests` (Rust) |
 | **Inter-node RPC** | [`proto/dref.proto`](proto/dref.proto), [`proto/dref_consensus.proto`](proto/dref_consensus.proto) | `ProtoRaftDRefSpec` (Scala), `raft_tests` (Rust) |
 | **Redis backend** | Same key layout, TTL semantics, and keyspace-notification payloads | `CrossLangRedisSpec` (Scala), `crosslang_redis_tests` (Rust) |
 

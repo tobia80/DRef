@@ -469,8 +469,9 @@ impl DRefContext for RaftDRefContext {
     }
 
     fn on_change_stream(&self, name: &str) -> BoxStream<'static, Result<ChangeEvent, DRefError>> {
-        // Subscribe to the LOCAL state machine. Followers apply commands
-        // too, so a subscriber on any node sees every committed change.
+        // Subscribe to the LOCAL state machine. Followers apply committed
+        // entries after the leader propagates the commit index, so a
+        // subscriber on any node eventually sees every committed change.
         let rx = self.inner.consensus.state_machine.subscribe();
         let want = name.to_string();
         let s = BroadcastStream::new(rx).filter_map(move |item| {
