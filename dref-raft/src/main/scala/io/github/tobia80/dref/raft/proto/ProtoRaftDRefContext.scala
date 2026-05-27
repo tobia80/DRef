@@ -16,6 +16,7 @@ trait ProtoRaftDRefContext extends DRefContext {
   def nodeId: String
   def isLeader: Task[Boolean]
   def leaderId: Task[Option[String]]
+  def currentTerm: Task[Long]
 }
 
 object ProtoRaftDRefContext {
@@ -243,6 +244,8 @@ object ProtoRaftDRefContext {
     override def isLeader: Task[Boolean] = consensus.isLeader
 
     override def leaderId: Task[Option[String]] = consensus.leaderId
+
+    override def currentTerm: Task[Long] = consensus.currentTerm
 
     override def defaultTtl: Duration = config.ttl.getOrElse(20.seconds)
 

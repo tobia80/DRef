@@ -50,6 +50,25 @@ message VoteResponse {
   uint64 term = 2;
 }
 
+// Raft PreVote (Ongaro thesis §9.6). The candidate's `term` field carries the
+// hypothetical term it WOULD enter (i.e. currentTerm + 1) without actually
+// incrementing it locally. A grant means "if you ran a real election right
+// now, I would vote for you" and does NOT change the voter's persisted
+// term/votedFor. A voter only grants when (a) the candidate's last_seq is at
+// least as up-to-date as its own AND (b) it has not heard from a current
+// leader within the election timeout — preventing a partitioned node from
+// disrupting an otherwise healthy cluster with stale term bumps.
+message PreVoteRequest {
+  string candidate_id = 1;
+  uint64 term = 2;
+  uint64 last_seq = 3;
+}
+
+message PreVoteResponse {
+  bool granted = 1;
+  uint64 term = 2;
+}
+
 message InstallSnapshotRequest {
   string leader_id = 1;
   uint64 term = 2;
@@ -66,5 +85,6 @@ service DRefConsensus {
   rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse) {}
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse) {}
   rpc RequestVote(VoteRequest) returns (VoteResponse) {}
+  rpc RequestPreVote(PreVoteRequest) returns (PreVoteResponse) {}
   rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse) {}
 }

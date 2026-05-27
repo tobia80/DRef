@@ -20,7 +20,8 @@ use crate::proto::dref::{
 use crate::proto::dref_consensus::d_ref_consensus_server::DRefConsensus;
 use crate::proto::dref_consensus::{
     AppendEntriesRequest, AppendEntriesResponse, HeartbeatRequest, HeartbeatResponse,
-    InstallSnapshotRequest, InstallSnapshotResponse, VoteRequest, VoteResponse,
+    InstallSnapshotRequest, InstallSnapshotResponse, PreVoteRequest, PreVoteResponse, VoteRequest,
+    VoteResponse,
 };
 use crate::state_command::StateCommand;
 use crate::state_machine::{unix_millis, ApplyResult};
@@ -180,6 +181,18 @@ impl DRefConsensus for DRefConsensusService {
             .handle_vote(r.candidate_id, r.term, r.last_seq)
             .await;
         Ok(Response::new(VoteResponse { granted, term }))
+    }
+
+    async fn request_pre_vote(
+        &self,
+        request: Request<PreVoteRequest>,
+    ) -> Result<Response<PreVoteResponse>, Status> {
+        let r = request.into_inner();
+        let (granted, term) = self
+            .consensus
+            .handle_pre_vote(r.candidate_id, r.term, r.last_seq)
+            .await;
+        Ok(Response::new(PreVoteResponse { granted, term }))
     }
 
     async fn install_snapshot(

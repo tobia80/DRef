@@ -42,7 +42,8 @@ use crate::voter_state_store::{
     FileVoterStateStore, NoopVoterStateStore, VoterState, VoterStateStore,
 };
 use crate::proto::dref_consensus::{
-    AppendEntriesRequest, ClusterSnapshot, HeartbeatRequest, InstallSnapshotRequest, VoteRequest,
+    AppendEntriesRequest, ClusterSnapshot, HeartbeatRequest, InstallSnapshotRequest,
+    PreVoteRequest, VoteRequest,
 };
 use crate::state_command::{self, StateCommand};
 use crate::state_machine::{ApplyResult, StateMachine};
@@ -289,6 +290,13 @@ impl Consensus {
         self.state.read().await.leader_id.clone()
     }
 
+    /// Current Raft term as this node sees it. Exposed for tests that need
+    /// to assert the term does not spike across cluster events (e.g.
+    /// follower restart with PreVote enabled).
+    pub async fn current_term(&self) -> u64 {
+        self.state.read().await.term
+    }
+
     /// Resolve the address of the current leader. Returns `None` if no
     /// leader is known yet OR the leader isn't in the peer map (i.e. it's
     /// us — caller should check `is_leader` first).
@@ -492,6 +500,52 @@ impl Consensus {
         .await
     }
 
+    /// Handle a PreVote request. PreVote (Ongaro thesis §9.6) is a
+    /// "would-you-vote-for-me" query that runs BEFORE the candidate bumps
+    /// its term. The voter:
+    ///
+    /// 1. does NOT change its own term or `voted_for` — granting a PreVote
+    ///    is just a hypothetical answer, so there is nothing to persist;
+    /// 2. refuses if it has heard from a leader within the election
+    ///    timeout — that's the whole point: a node that lost contact with
+    ///    the cluster and keeps incrementing its term in the background
+    ///    must not be able to force a real election that disrupts the
+    ///    current leader once it rejoins;
+    /// 3. otherwise grants iff the candidate's `last_seq` is at least as
+    ///    up-to-date as ours AND the candidate's proposed term (the term
+    ///    it would enter) is strictly greater than our current term.
+    ///
+    /// The returned `term` is always our current term — the voter never
+    /// adopts the candidate's hypothetical term from a PreVote.
+    pub async fn handle_pre_vote(
+        &self,
+        _candidate_id: String,
+        term: u64,
+        last_seq: u64,
+    ) -> (bool, u64) {
+        let st = self.state.read().await;
+        // Stale candidate: its proposed term doesn't even beat ours.
+        if term <= st.term {
+            return (false, st.term);
+        }
+        // Leader-stickiness: a node that still believes it is leading the
+        // cluster must refuse pre-votes outright — granting one would
+        // amount to volunteering its own demotion. A leader that has gone
+        // stale will only learn so when a real AppendEntries/Heartbeat
+        // response comes back with a higher term; until then it trusts
+        // its own role. For followers, the recency check on the last
+        // heartbeat plays the same role — if we've heard from a leader
+        // within the election timeout, the cluster is healthy and we
+        // shouldn't help an isolated candidate disrupt it.
+        let leader_recent = st.last_heartbeat.elapsed() < self.config.election_timeout;
+        let is_active_leader = st.role == Role::Leader;
+        if is_active_leader || (leader_recent && st.leader_id.is_some()) {
+            return (false, st.term);
+        }
+        let up_to_date = last_seq >= st.last_seq;
+        (up_to_date, st.term)
+    }
+
     /// Handle a vote request from a candidate. Grants iff we haven't voted
     /// in this term and the candidate's seq is at least as up-to-date as
     /// ours. (Real Raft compares (term, index); we conflate index into our
@@ -644,7 +698,87 @@ impl Consensus {
         }
     }
 
+    /// Run a PreVote round before bumping our term. If we can't win a
+    /// majority of pre-votes, we stay follower and avoid disturbing the
+    /// current leader's term. Returns `true` iff we should proceed to a
+    /// real election.
+    ///
+    /// PreVote uses our CURRENT term + 1 as the hypothetical term, but
+    /// does NOT mutate our state. A single-node cluster trivially wins.
+    async fn run_pre_vote(&self) -> bool {
+        let (current_term, last_seq) = {
+            let st = self.state.read().await;
+            (st.term, st.last_seq)
+        };
+        let proposed_term = current_term + 1;
+        let peers: Vec<(String, Arc<PeerConn>)> = self
+            .peers
+            .read()
+            .await
+            .iter()
+            .map(|(id, p)| (id.clone(), Arc::clone(p)))
+            .collect();
+        let cluster_size = peers.len() + 1;
+        let needed = cluster_size / 2 + 1;
+        // We always pre-vote for ourselves.
+        let mut grants: usize = 1;
+        if grants >= needed {
+            return true;
+        }
+
+        let mut futs = Vec::new();
+        for (id, peer) in peers {
+            let candidate_id = self.node_id.clone();
+            let timeout = self.config.connection_timeout;
+            futs.push(tokio::spawn(async move {
+                let mut client = peer.client(timeout).await.ok()?;
+                let req = PreVoteRequest {
+                    candidate_id,
+                    term: proposed_term,
+                    last_seq,
+                };
+                match client.request_pre_vote(req).await {
+                    Ok(resp) => Some((id, resp.into_inner())),
+                    Err(e) => {
+                        debug!(peer = %id, error = ?e, "pre-vote request failed");
+                        None
+                    }
+                }
+            }));
+        }
+
+        for fut in futs {
+            if let Ok(Some((_id, resp))) = fut.await {
+                // PreVote responses can carry a strictly-greater term if a
+                // peer has already advanced past our current_term. Treat
+                // that as a step-down signal — a real election would just
+                // lose to the same higher-term holder.
+                if resp.term > current_term {
+                    self.step_down_if_stale(resp.term).await;
+                    return false;
+                }
+                if resp.granted {
+                    grants += 1;
+                }
+            }
+        }
+        grants >= needed
+    }
+
     async fn start_election(&self) {
+        // PreVote gate: only proceed if a quorum says they'd vote for us
+        // right now. This prevents a partitioned node that keeps timing
+        // out from incrementing its term forever and disrupting the
+        // cluster the moment its network heals.
+        if !self.run_pre_vote().await {
+            debug!(node = %self.node_id, "pre-vote did not pass; staying follower");
+            // Refresh the heartbeat clock so we don't immediately spin
+            // into another pre-vote attempt on the next tick.
+            let mut st = self.state.write().await;
+            st.last_heartbeat = Instant::now();
+            return;
+        }
+
         let (term, last_seq) = self
             .update_and_persist(|mut st| {
                 st.role = Role::Candidate;

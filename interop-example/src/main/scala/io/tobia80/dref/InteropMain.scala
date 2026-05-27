@@ -88,9 +88,7 @@ object InteropMain extends ZIOAppDefault {
             Console.print(s"\u001b[34m[$displayName] > \u001b[0m") *>
               Console.readLine.flatMap { line =>
                 val text = Option(line).map(_.trim).getOrElse("")
-                dref.set(ChatMsg(displayName, text)).when(text.nonEmpty && text.toLowerCase != "exit") *> ZIO.succeed(
-                  text
-                )
+                dref.set(ChatMsg(displayName, text)).when(text.nonEmpty && text.toLowerCase != "exit").as(text)
               }
           }
         }
