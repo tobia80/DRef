@@ -187,19 +187,11 @@ object ProtoRaftDRefContext {
     clientsRef: Ref[Map[String, DRefRaftClient]],
     endpoints: List[NodeEndpoint]
   ): ZIO[Scope, Throwable, Unit] =
-    for {
-      current <- clientsRef.get
-      desired  = endpoints.map(ep => ep.id -> ep.address).toMap
-      toRemove = current.keySet -- desired.keySet
-      toAdd    = endpoints.filter(ep => !current.contains(ep.id))
-      _       <- ZIO.foreachDiscard(toRemove)(id => clientsRef.update(_ - id))
-      added   <- ZIO.foreach(toAdd) { ep =>
-                   DRefRaftClient
-                     .scoped(GrpcChannels.managedChannel(ep.address))
-                     .map(ep.id -> _)
-                 }
-      _       <- clientsRef.update(_ ++ added.toMap).when(added.nonEmpty)
-    } yield ()
+    PeerMapSync.sync(
+      clientsRef,
+      endpoints,
+      ep => DRefRaftClient.scoped(GrpcChannels.managedChannel(ep.address))
+    )
 
   private def refreshAliases(
     ipClientsRef: Ref[Map[String, DRefRaftClient]],

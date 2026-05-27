@@ -5,6 +5,8 @@
 //! (`proto/state_command.proto`) so Scala and Rust nodes can participate in
 //! the same cluster.
 
+mod binary_io;
+
 pub mod command_log_store;
 pub mod config;
 pub mod consensus;
@@ -20,10 +22,6 @@ pub mod voter_state_store;
 /// Generated protobuf modules.
 pub mod proto {
     pub mod dref {
-        tonic::include_proto!("io.github.tobia80");
-    }
-
-    pub mod raft {
         tonic::include_proto!("io.github.tobia80");
     }
 

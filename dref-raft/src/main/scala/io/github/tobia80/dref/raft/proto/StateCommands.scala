@@ -27,7 +27,4 @@ object StateCommands {
 
   def deleteIfExpired(name: String, now: Long): StateCommand =
     StateCommand(StateCommand.Op.DeleteIfExpired(DeleteIfExpiredCommand(name, now)))
-
-  def startNewTerm: StateCommand =
-    StateCommand(StateCommand.Op.StartNewTerm(StartNewTermCommand()))
 }

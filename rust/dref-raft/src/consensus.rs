@@ -451,6 +451,43 @@ impl Consensus {
         cluster_size / 2 + 1
     }
 
+    async fn peer_connections(&self) -> Vec<(String, Arc<PeerConn>)> {
+        self.peers
+            .read()
+            .await
+            .iter()
+            .map(|(id, p)| (id.clone(), Arc::clone(p)))
+            .collect()
+    }
+
+    fn step_to_follower(mut st: ConsensusState, term: u64, leader_id: String) -> ConsensusState {
+        if term > st.term {
+            st.term = term;
+            st.voted_for = None;
+        }
+        st.role = Role::Follower;
+        st.leader_id = Some(leader_id);
+        st.last_heartbeat = Instant::now();
+        st
+    }
+
+    fn follow_leader_or_reject<F>(
+        st: ConsensusState,
+        leader_id: String,
+        term: u64,
+        when_following: F,
+    ) -> ((bool, u64), ConsensusState)
+    where
+        F: FnOnce(ConsensusState) -> (bool, ConsensusState),
+    {
+        if term < st.term {
+            return ((false, st.term), st);
+        }
+        let next = Self::step_to_follower(st, term, leader_id);
+        let (accepted, updated) = when_following(next);
+        ((accepted, updated.term), updated)
+    }
+
     /// Apply pending entries up to `commit_seq` and advance the committed/applied markers.
     ///
     /// Serialised on `apply_mutex` so concurrent inbound RPCs (e.g. a heartbeat racing an
@@ -522,13 +559,7 @@ impl Consensus {
     }
 
     async fn propagate_commit_seq(&self, commit_seq: u64, term: u64) {
-        let peers: Vec<(String, Arc<PeerConn>)> = self
-            .peers
-            .read()
-            .await
-            .iter()
-            .map(|(id, p)| (id.clone(), Arc::clone(p)))
-            .collect();
+        let peers = self.peer_connections().await;
         let mut futs = Vec::new();
         for (id, peer) in peers {
             let leader_id = self.node_id.clone();
@@ -583,13 +614,7 @@ impl Consensus {
                 .map_err(|e| ConsensusError::Serialize(e.to_string()))
         })
         .await?;
-        let peers: Vec<(String, Arc<PeerConn>)> = self
-            .peers
-            .read()
-            .await
-            .iter()
-            .map(|(id, p)| (id.clone(), Arc::clone(p)))
-            .collect();
+        let peers = self.peer_connections().await;
         let needed = Self::quorum_needed(peers.len() + 1);
         let follower_acks = self
             .replicate_for_quorum(term, seq, bytes, commit_seq_before, peers)
@@ -640,13 +665,7 @@ impl Consensus {
             )
         };
 
-        let peers: Vec<(String, Arc<PeerConn>)> = self
-            .peers
-            .read()
-            .await
-            .iter()
-            .map(|(id, p)| (id.clone(), Arc::clone(p)))
-            .collect();
+        let peers = self.peer_connections().await;
         let needed = Self::quorum_needed(peers.len() + 1);
         let mut grants: usize = 1;
         let mut futs = Vec::new();
@@ -744,9 +763,37 @@ impl Consensus {
         acks
     }
 
+    async fn install_snapshot_to_peer(
+        &self,
+        peer_id: &str,
+        peer: &Arc<PeerConn>,
+        snapshot: ClusterSnapshot,
+        term: u64,
+        last_seq: u64,
+    ) {
+        match peer.client(self.config.connection_timeout).await {
+            Ok(mut client) => {
+                let req = InstallSnapshotRequest {
+                    leader_id: self.node_id.clone(),
+                    term,
+                    snapshot: Some(snapshot),
+                    last_seq,
+                };
+                match client.install_snapshot(req).await {
+                    Ok(resp) => {
+                        self.step_down_if_stale(resp.into_inner().term).await;
+                    }
+                    Err(e) => {
+                        debug!(peer = %peer_id, error = ?e, "InstallSnapshot failed");
+                        peer.reset().await;
+                    }
+                }
+            }
+            Err(e) => debug!(peer = %peer_id, error = ?e, "no client for InstallSnapshot"),
+        }
+    }
+
     async fn send_snapshot_to(&self, peer_id: &str, peer: &Arc<PeerConn>) {
-        // last_applied — NOT last_seq — bounds the snapshot. Sending last_seq would let the
-        // follower advance its commit index past entries the leader itself hasn't applied.
         let (term, last_applied, still_leader) = {
             let st = self.state.read().await;
             (st.term, st.last_applied, st.role == Role::Leader)
@@ -755,26 +802,8 @@ impl Consensus {
             return;
         }
         let snapshot = self.state_machine.take_snapshot().await;
-        match peer.client(self.config.connection_timeout).await {
-            Ok(mut client) => {
-                let req = InstallSnapshotRequest {
-                    leader_id: self.node_id.clone(),
-                    term,
-                    snapshot: Some(snapshot),
-                    last_seq: last_applied,
-                };
-                match client.install_snapshot(req).await {
-                    Ok(resp) => {
-                        self.step_down_if_stale(resp.into_inner().term).await;
-                    }
-                    Err(e) => {
-                        debug!(peer = %peer_id, error = ?e, "InstallSnapshot catch-up failed");
-                        peer.reset().await;
-                    }
-                }
-            }
-            Err(e) => debug!(peer = %peer_id, error = ?e, "no client for snapshot catch-up"),
-        }
+        self.install_snapshot_to_peer(peer_id, peer, snapshot, term, last_applied)
+            .await;
     }
 
     // --- Handlers for inbound RPCs (called by the gRPC server) --------------
@@ -791,22 +820,15 @@ impl Consensus {
         commit_seq: u64,
     ) -> (bool, u64) {
         let (accepted, current_term) = self
-            .update_and_persist(|mut st| {
-                if term < st.term {
-                    return ((false, st.term), st);
-                }
-                if term > st.term {
-                    st.term = term;
-                    st.voted_for = None;
-                }
-                st.role = Role::Follower;
-                st.leader_id = Some(leader_id.clone());
-                st.last_heartbeat = Instant::now();
-                if seq != st.last_seq + 1 {
-                    return ((false, st.term), st);
-                }
-                st.last_seq = seq;
-                ((true, st.term), st)
+            .update_and_persist(|st| {
+                Self::follow_leader_or_reject(st, leader_id.clone(), term, |mut next| {
+                    if seq != next.last_seq + 1 {
+                        (false, next)
+                    } else {
+                        next.last_seq = seq;
+                        (true, next)
+                    }
+                })
             })
             .await;
 
@@ -835,18 +857,8 @@ impl Consensus {
         commit_seq: u64,
     ) -> (bool, u64) {
         let (acknowledged, current_term) = self
-            .update_and_persist(|mut st| {
-                if term < st.term {
-                    return ((false, st.term), st);
-                }
-                if term > st.term {
-                    st.term = term;
-                    st.voted_for = None;
-                }
-                st.role = Role::Follower;
-                st.leader_id = Some(leader_id);
-                st.last_heartbeat = Instant::now();
-                ((true, st.term), st)
+            .update_and_persist(|st| {
+                Self::follow_leader_or_reject(st, leader_id, term, |next| (true, next))
             })
             .await;
 
@@ -954,19 +966,11 @@ impl Consensus {
         last_seq: u64,
     ) -> (bool, u64) {
         let (accepted, current_term) = self
-            .update_and_persist(|mut st| {
-                if term < st.term {
-                    return ((false, st.term), st);
-                }
-                if term > st.term {
-                    st.term = term;
-                    st.voted_for = None;
-                }
-                st.role = Role::Follower;
-                st.leader_id = Some(leader_id);
-                st.last_heartbeat = Instant::now();
-                st.last_seq = last_seq;
-                ((true, st.term), st)
+            .update_and_persist(|st| {
+                Self::follow_leader_or_reject(st, leader_id, term, |mut next| {
+                    next.last_seq = last_seq;
+                    (true, next)
+                })
             })
             .await;
 
@@ -1045,13 +1049,7 @@ impl Consensus {
             let st = self.state.read().await;
             (st.term, st.commit_seq)
         };
-        let peers: Vec<(String, Arc<PeerConn>)> = self
-            .peers
-            .read()
-            .await
-            .iter()
-            .map(|(id, p)| (id.clone(), Arc::clone(p)))
-            .collect();
+        let peers = self.peer_connections().await;
         for (id, peer) in peers {
             let leader_id = self.node_id.clone();
             let timeout = self.config.connection_timeout;
@@ -1093,15 +1091,8 @@ impl Consensus {
             (st.term, st.last_seq)
         };
         let proposed_term = current_term + 1;
-        let peers: Vec<(String, Arc<PeerConn>)> = self
-            .peers
-            .read()
-            .await
-            .iter()
-            .map(|(id, p)| (id.clone(), Arc::clone(p)))
-            .collect();
-        let cluster_size = peers.len() + 1;
-        let needed = cluster_size / 2 + 1;
+        let peers = self.peer_connections().await;
+        let needed = Self::quorum_needed(peers.len() + 1);
         // We always pre-vote for ourselves.
         let mut grants: usize = 1;
         if grants >= needed {
@@ -1175,15 +1166,8 @@ impl Consensus {
 
         // Tally: 1 vote (us). The peer count is the rest of the cluster;
         // majority is over the FULL cluster including us.
-        let peers: Vec<(String, Arc<PeerConn>)> = self
-            .peers
-            .read()
-            .await
-            .iter()
-            .map(|(id, p)| (id.clone(), Arc::clone(p)))
-            .collect();
-        let cluster_size = peers.len() + 1;
-        let needed = cluster_size / 2 + 1;
+        let peers = self.peer_connections().await;
+        let needed = Self::quorum_needed(peers.len() + 1);
         let mut votes: usize = 1;
 
         let mut futs = Vec::new();
@@ -1241,45 +1225,17 @@ impl Consensus {
     /// Send the current state machine snapshot to every peer. Called when
     /// we just won an election or when a follower asks to be caught up.
     async fn broadcast_snapshot(&self) {
-        // Snapshot covers entries applied through last_applied — see send_snapshot_to.
         let (term, last_applied) = {
             let st = self.state.read().await;
             (st.term, st.last_applied)
         };
         let snapshot = self.state_machine.take_snapshot().await;
-        let peers: Vec<(String, Arc<PeerConn>)> = self
-            .peers
-            .read()
-            .await
-            .iter()
-            .map(|(id, p)| (id.clone(), Arc::clone(p)))
-            .collect();
-        for (id, peer) in peers {
-            let leader_id = self.node_id.clone();
-            let timeout = self.config.connection_timeout;
+        for (id, peer) in self.peer_connections().await {
             let snapshot = snapshot.clone();
             let this = self.clone();
             tokio::spawn(async move {
-                match peer.client(timeout).await {
-                    Ok(mut client) => {
-                        let req = InstallSnapshotRequest {
-                            leader_id,
-                            term,
-                            snapshot: Some(snapshot),
-                            last_seq: last_applied,
-                        };
-                        match client.install_snapshot(req).await {
-                            Ok(resp) => {
-                                this.step_down_if_stale(resp.into_inner().term).await;
-                            }
-                            Err(e) => {
-                                debug!(peer = %id, error = ?e, "InstallSnapshot failed");
-                                peer.reset().await;
-                            }
-                        }
-                    }
-                    Err(e) => debug!(peer = %id, error = ?e, "no client"),
-                }
+                this.install_snapshot_to_peer(&id, &peer, snapshot, term, last_applied)
+                    .await;
             });
         }
     }

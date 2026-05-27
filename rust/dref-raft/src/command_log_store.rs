@@ -7,6 +7,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use crate::binary_io;
+
 const MAGIC: u32 = 0x4452_464c; // "DRFL"
 const VERSION: u8 = 1;
 const FILE_NAME: &str = "command-log";
@@ -149,7 +151,7 @@ impl CommandLogStore for FileCommandLogStore {
         self.ensure_header()?;
         let mut file = OpenOptions::new().write(true).open(self.target())?;
         file.seek(SeekFrom::Start(5))?;
-        write_u64_be(&mut file, commit_seq)?;
+        binary_io::write_u64_be(&mut file, commit_seq).map_err(CommandLogError::Io)?;
         file.sync_all()?;
         Ok(())
     }
@@ -191,26 +193,26 @@ impl CommandLogStore for FileCommandLogStore {
 }
 
 fn read_log<R: Read>(mut r: R) -> Result<CommandLogState, CommandLogError> {
-    let magic = read_u32_be(&mut r)?;
+    let magic = binary_io::read_u32_be(&mut r).map_err(map_io)?;
     if magic != MAGIC {
         return Err(CommandLogError::BadMagic { got: magic });
     }
-    let version = read_u8(&mut r)?;
+    let version = binary_io::read_u8(&mut r).map_err(map_io)?;
     if version != VERSION {
         return Err(CommandLogError::BadVersion { version });
     }
-    let commit_seq = read_u64_be(&mut r)?;
+    let commit_seq = binary_io::read_u64_be(&mut r).map_err(map_io)?;
     let mut entries = BTreeMap::new();
     loop {
-        match read_u64_be(&mut r) {
+        match binary_io::read_u64_be(&mut r).map_err(map_io) {
             Ok(seq) => {
-                let len = read_i32_be(&mut r)?;
+                let len = binary_io::read_i32_be(&mut r).map_err(map_io)?;
                 if len < 0 {
                     return Err(CommandLogError::NegativeLength { seq });
                 }
                 let len = len as usize;
                 let mut command = vec![0u8; len];
-                r.read_exact(&mut command).map_err(map_eof)?;
+                r.read_exact(&mut command).map_err(map_io)?;
                 entries.insert(seq, command);
             }
             Err(CommandLogError::Truncated) => break,
@@ -221,61 +223,21 @@ fn read_log<R: Read>(mut r: R) -> Result<CommandLogState, CommandLogError> {
 }
 
 fn write_header<W: Write>(w: &mut W, commit_seq: u64) -> Result<(), CommandLogError> {
-    write_u32_be(w, MAGIC)?;
-    write_u8(w, VERSION)?;
-    write_u64_be(w, commit_seq)?;
+    binary_io::write_u32_be(w, MAGIC).map_err(CommandLogError::Io)?;
+    binary_io::write_u8(w, VERSION).map_err(CommandLogError::Io)?;
+    binary_io::write_u64_be(w, commit_seq).map_err(CommandLogError::Io)?;
     Ok(())
 }
 
 fn write_record<W: Write>(w: &mut W, seq: u64, command: &[u8]) -> Result<(), CommandLogError> {
-    write_u64_be(w, seq)?;
-    write_i32_be(w, command.len() as i32)?;
+    binary_io::write_u64_be(w, seq).map_err(CommandLogError::Io)?;
+    binary_io::write_i32_be(w, command.len() as i32).map_err(CommandLogError::Io)?;
     w.write_all(command).map_err(CommandLogError::Io)?;
     Ok(())
 }
 
-fn read_u8(r: &mut impl Read) -> Result<u8, CommandLogError> {
-    let mut b = [0u8; 1];
-    r.read_exact(&mut b).map_err(map_eof)?;
-    Ok(b[0])
-}
-
-fn read_u32_be(r: &mut impl Read) -> Result<u32, CommandLogError> {
-    let mut b = [0u8; 4];
-    r.read_exact(&mut b).map_err(map_eof)?;
-    Ok(u32::from_be_bytes(b))
-}
-
-fn read_i32_be(r: &mut impl Read) -> Result<i32, CommandLogError> {
-    let mut b = [0u8; 4];
-    r.read_exact(&mut b).map_err(map_eof)?;
-    Ok(i32::from_be_bytes(b))
-}
-
-fn read_u64_be(r: &mut impl Read) -> Result<u64, CommandLogError> {
-    let mut b = [0u8; 8];
-    r.read_exact(&mut b).map_err(map_eof)?;
-    Ok(u64::from_be_bytes(b))
-}
-
-fn write_u8(w: &mut impl Write, v: u8) -> Result<(), CommandLogError> {
-    w.write_all(&[v]).map_err(CommandLogError::Io)
-}
-
-fn write_u32_be(w: &mut impl Write, v: u32) -> Result<(), CommandLogError> {
-    w.write_all(&v.to_be_bytes()).map_err(CommandLogError::Io)
-}
-
-fn write_i32_be(w: &mut impl Write, v: i32) -> Result<(), CommandLogError> {
-    w.write_all(&v.to_be_bytes()).map_err(CommandLogError::Io)
-}
-
-fn write_u64_be(w: &mut impl Write, v: u64) -> Result<(), CommandLogError> {
-    w.write_all(&v.to_be_bytes()).map_err(CommandLogError::Io)
-}
-
-fn map_eof(e: io::Error) -> CommandLogError {
-    if e.kind() == io::ErrorKind::UnexpectedEof {
+fn map_io(e: io::Error) -> CommandLogError {
+    if binary_io::is_truncated(&e) {
         CommandLogError::Truncated
     } else {
         CommandLogError::Io(e)
