@@ -12,6 +12,8 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
+use crate::binary_io;
+
 use prost::Message;
 
 use crate::proto::dref_consensus::ClusterSnapshot;
@@ -100,65 +102,35 @@ impl StateMachineSnapshotStore for FileStateMachineSnapshotStore {
 }
 
 fn read_snapshot<R: Read>(mut r: R) -> Result<ClusterSnapshot, SnapshotError> {
-    let magic = read_u32_be(&mut r)?;
+    let magic = binary_io::read_u32_be(&mut r).map_err(map_io)?;
     if magic != MAGIC {
         return Err(SnapshotError::BadMagic { got: magic });
     }
-    let version = read_u8(&mut r)?;
+    let version = binary_io::read_u8(&mut r).map_err(map_io)?;
     if version != VERSION {
         return Err(SnapshotError::BadVersion { version });
     }
-    let len = read_i32_be(&mut r)?;
+    let len = binary_io::read_i32_be(&mut r).map_err(map_io)?;
     if len < 0 {
         return Err(SnapshotError::BadLength(len));
     }
     let mut payload = vec![0u8; len as usize];
-    r.read_exact(&mut payload).map_err(map_eof)?;
+    r.read_exact(&mut payload).map_err(map_io)?;
     let snapshot = ClusterSnapshot::decode(payload.as_slice())?;
     Ok(snapshot)
 }
 
 fn write_snapshot<W: Write>(w: &mut W, snapshot: &ClusterSnapshot) -> Result<(), SnapshotError> {
     let payload = snapshot.encode_to_vec();
-    write_u32_be(w, MAGIC)?;
-    write_u8(w, VERSION)?;
-    write_i32_be(w, payload.len() as i32)?;
+    binary_io::write_u32_be(w, MAGIC).map_err(SnapshotError::Io)?;
+    binary_io::write_u8(w, VERSION).map_err(SnapshotError::Io)?;
+    binary_io::write_i32_be(w, payload.len() as i32).map_err(SnapshotError::Io)?;
     w.write_all(&payload)?;
     Ok(())
 }
 
-fn read_u8(r: &mut impl Read) -> Result<u8, SnapshotError> {
-    let mut b = [0u8; 1];
-    r.read_exact(&mut b).map_err(map_eof)?;
-    Ok(b[0])
-}
-
-fn read_u32_be(r: &mut impl Read) -> Result<u32, SnapshotError> {
-    let mut b = [0u8; 4];
-    r.read_exact(&mut b).map_err(map_eof)?;
-    Ok(u32::from_be_bytes(b))
-}
-
-fn read_i32_be(r: &mut impl Read) -> Result<i32, SnapshotError> {
-    let mut b = [0u8; 4];
-    r.read_exact(&mut b).map_err(map_eof)?;
-    Ok(i32::from_be_bytes(b))
-}
-
-fn write_u8(w: &mut impl Write, v: u8) -> Result<(), SnapshotError> {
-    w.write_all(&[v]).map_err(SnapshotError::Io)
-}
-
-fn write_u32_be(w: &mut impl Write, v: u32) -> Result<(), SnapshotError> {
-    w.write_all(&v.to_be_bytes()).map_err(SnapshotError::Io)
-}
-
-fn write_i32_be(w: &mut impl Write, v: i32) -> Result<(), SnapshotError> {
-    w.write_all(&v.to_be_bytes()).map_err(SnapshotError::Io)
-}
-
-fn map_eof(e: io::Error) -> SnapshotError {
-    if e.kind() == io::ErrorKind::UnexpectedEof {
+fn map_io(e: io::Error) -> SnapshotError {
+    if binary_io::is_truncated(&e) {
         SnapshotError::Truncated
     } else {
         SnapshotError::Io(e)
