@@ -105,9 +105,7 @@ impl StateMachine {
                 let mut map = self.inner.write().await;
                 map.remove(&name);
                 drop(map);
-                let _ = self
-                    .changes_tx
-                    .send(ChangeEvent::DeleteElement { name });
+                let _ = self.changes_tx.send(ChangeEvent::DeleteElement { name });
                 ApplyResult::Unit
             }
             Some(state_command::Op::ExpireElement(ExpireElementCommand { name, expire_at })) => {
@@ -127,9 +125,7 @@ impl StateMachine {
                 if should_delete {
                     map.remove(&name);
                     drop(map);
-                    let _ = self
-                        .changes_tx
-                        .send(ChangeEvent::DeleteElement { name });
+                    let _ = self.changes_tx.send(ChangeEvent::DeleteElement { name });
                 }
                 ApplyResult::Unit
             }
@@ -166,7 +162,10 @@ impl StateMachine {
                 expire_at: v.expire_at,
             })
             .collect();
-        ClusterSnapshot { entries }
+        ClusterSnapshot {
+            entries,
+            last_seq: 0,
+        }
     }
 
     pub async fn install_snapshot(&self, snapshot: ClusterSnapshot) {

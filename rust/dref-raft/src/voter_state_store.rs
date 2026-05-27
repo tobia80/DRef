@@ -123,10 +123,10 @@ fn read_state<R: Read>(mut r: R) -> Result<VoterState, VoterStateError> {
                 VoterStateError::Io(e)
             }
         })?;
-        Some(String::from_utf8(buf).map_err(|e| VoterStateError::Io(io::Error::new(
-            io::ErrorKind::InvalidData,
-            e,
-        )))?)
+        Some(
+            String::from_utf8(buf)
+                .map_err(|e| VoterStateError::Io(io::Error::new(io::ErrorKind::InvalidData, e)))?,
+        )
     };
     Ok(VoterState { term, voted_for })
 }
@@ -231,7 +231,12 @@ mod tests {
         let dir = temp_dir("round-trip-none");
         let _ = fs::remove_dir_all(&dir);
         let store = FileVoterStateStore::open(&dir).unwrap();
-        store.save(&VoterState { term: 7, voted_for: None }).unwrap();
+        store
+            .save(&VoterState {
+                term: 7,
+                voted_for: None,
+            })
+            .unwrap();
         assert_eq!(
             store.load().unwrap(),
             VoterState {
@@ -268,7 +273,12 @@ mod tests {
         let dir = temp_dir("corrupt");
         let _ = fs::remove_dir_all(&dir);
         let store = FileVoterStateStore::open(&dir).unwrap();
-        store.save(&VoterState { term: 5, voted_for: Some("n".into()) }).unwrap();
+        store
+            .save(&VoterState {
+                term: 5,
+                voted_for: Some("n".into()),
+            })
+            .unwrap();
         let path = store.target();
         let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         f.seek(SeekFrom::Start(0)).unwrap();

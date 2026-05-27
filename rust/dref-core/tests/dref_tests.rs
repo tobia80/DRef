@@ -47,7 +47,10 @@ async fn should_listen_for_changes() -> Result<(), DRefError> {
     aref.set("changed again".to_string()).await?;
 
     let mutations = collector.await.expect("collector task");
-    assert_eq!(mutations, vec!["hello".to_string(), "changed again".to_string()]);
+    assert_eq!(
+        mutations,
+        vec!["hello".to_string(), "changed again".to_string()]
+    );
     Ok(())
 }
 

@@ -38,15 +38,15 @@ async fn fresh_context() -> RedisDRefContext {
 async fn should_create_and_read_via_redis() -> Result<(), DRefError> {
     let ctx = fresh_context().await;
     // Use a manual name so the test is independent of file:line.
-    let aref =
-        DRef::<String, _>::make_with_name(&ctx, "dref-redis-test:create-and-read", || {
-            "hi".to_string()
-        })
-        .await?;
+    let aref = DRef::<String, _>::make_with_name(&ctx, "dref-redis-test:create-and-read", || {
+        "hi".to_string()
+    })
+    .await?;
     aref.set("hello".to_string()).await?;
     let value = aref.get().await?;
     assert_eq!(value, "hello");
-    ctx.delete_element("dref-redis-test:create-and-read").await?;
+    ctx.delete_element("dref-redis-test:create-and-read")
+        .await?;
     Ok(())
 }
 
@@ -57,8 +57,7 @@ async fn should_listen_for_changes_via_redis() -> Result<(), DRefError> {
     let key = "dref-redis-test:listen-for-changes";
     ctx.delete_element(key).await?;
 
-    let aref =
-        DRef::<String, _>::make_with_name(&ctx, key, || "hi".to_string()).await?;
+    let aref = DRef::<String, _>::make_with_name(&ctx, key, || "hi".to_string()).await?;
 
     // The Scala spec sleeps 50ms after `make` so the initial publish
     // (triggered by `set_element_if_not_exist`) drains before we attach the

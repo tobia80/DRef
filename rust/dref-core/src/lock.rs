@@ -48,11 +48,7 @@ where
     async move { lock_inner(context, name, body).await }
 }
 
-async fn lock_inner<C, F, Fut, T>(
-    context: C,
-    name: String,
-    body: F,
-) -> Result<T, DRefError>
+async fn lock_inner<C, F, Fut, T>(context: C, name: String, body: F) -> Result<T, DRefError>
 where
     C: DRefContext + Clone + Send + Sync + 'static,
     F: FnOnce() -> Fut + Send + 'static,
@@ -155,12 +151,7 @@ where
 }
 
 /// Try to acquire the lock, waiting for prior holders' deletions if needed.
-async fn acquire<C>(
-    context: &C,
-    name: &str,
-    value: &[u8],
-    ttl: Duration,
-) -> Result<(), DRefError>
+async fn acquire<C>(context: &C, name: &str, value: &[u8], ttl: Duration) -> Result<(), DRefError>
 where
     C: DRefContext + Send + Sync,
 {

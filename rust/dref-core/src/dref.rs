@@ -123,9 +123,7 @@ where
         let codec: Arc<dyn DRefCodec<T>> = Arc::new(MsgPackCodec::<T>::new());
         let bytes = codec.serialize(&init())?;
         // Seed the value only if it doesn't already exist (matches Scala).
-        context
-            .set_element_if_not_exist(&name, bytes, None)
-            .await?;
+        context.set_element_if_not_exist(&name, bytes, None).await?;
         Ok(Self {
             inner: Arc::new(DRefInner {
                 context: context.clone(),

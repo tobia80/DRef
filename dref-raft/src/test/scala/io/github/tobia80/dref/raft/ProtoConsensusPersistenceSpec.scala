@@ -1,6 +1,8 @@
 package io.github.tobia80.dref.raft
 
+import com.google.protobuf.ByteString
 import io.github.tobia80.dref.raft.proto.*
+import io.github.tobia80.state_command.{SetElementCommand, StateCommand}
 import zio.*
 import zio.test.*
 
@@ -24,7 +26,10 @@ object ProtoConsensusPersistenceSpec extends ZIOSpecDefault {
       ()
     }
 
-  private def singleNodeConfig(storage: Option[Path]): ProtoRaftConfig =
+  private def singleNodeConfig(
+    storage: Option[Path],
+    snapshotEvery: Int = 1000
+  ): ProtoRaftConfig =
     ProtoRaftConfig(
       port = 0,
       bindAddress = Some("127.0.0.1:0"),
@@ -34,7 +39,15 @@ object ProtoConsensusPersistenceSpec extends ZIOSpecDefault {
       electionTimeout = 5.seconds,   // long enough that no election fires during a test step
       heartbeatInterval = 1.second,
       initialEndpoints = List(NodeEndpoint("node-under-test", "127.0.0.1:0")),
-      storageDir = storage
+      storageDir = storage,
+      snapshotEvery = snapshotEvery
+    )
+
+  private def setElement(name: String, value: Array[Byte]): StateCommand =
+    StateCommand(
+      StateCommand.Op.SetElement(
+        SetElementCommand(name = name, value = ByteString.copyFrom(value), expireAt = None)
+      )
     )
 
   /** Build a consensus engine without spinning up its gRPC server. With a
@@ -42,10 +55,20 @@ object ProtoConsensusPersistenceSpec extends ZIOSpecDefault {
     * needed — we get to exercise the state machine logic directly.
     */
   private def makeEngine(storage: Option[Path]): ZIO[Scope, Throwable, ProtoConsensusEngine] =
+    makeEngineWithMachine(storage).map(_._2)
+
+  private def makeEngineWithMachine(
+    storage: Option[Path],
+    snapshotEvery: Int = 1000
+  ): ZIO[Scope, Throwable, (ProtoStateMachine, ProtoConsensusEngine)] =
     for {
       stateMachine <- ProtoStateMachine.make
-      engine       <- ProtoConsensusEngine.make("node-under-test", stateMachine, singleNodeConfig(storage))
-    } yield engine
+      engine       <- ProtoConsensusEngine.make(
+                        "node-under-test",
+                        stateMachine,
+                        singleNodeConfig(storage, snapshotEvery)
+                      )
+    } yield (stateMachine, engine)
 
   override def spec: Spec[TestEnvironment & Scope, Any] = suite("ProtoConsensusEngine persistence")(
     test("with no storageDir, granting a vote does not touch disk and behaves as before") {
@@ -198,6 +221,88 @@ object ProtoConsensusPersistenceSpec extends ZIOSpecDefault {
         !result._1,
         result._2 == 1L         // leader still believes it is term=1
       )
+    },
+    test("explicit snapshot persists state machine contents to disk") {
+      for {
+        dir              <- tempDir
+        first            <- makeEngineWithMachine(Some(dir))
+        (sm1, engine)     = first
+        _                <- engine.submit(setElement("alpha", Array[Byte](1, 2, 3))).either
+        _                <- engine.submit(setElement("beta", Array[Byte](42))).either
+        _                <- engine.takeAndPersistSnapshot
+        // verify the bytes really hit disk by re-opening with a fresh store
+        verifier         <- StateMachineSnapshotStore.file(dir)
+        loaded           <- verifier.load
+      } yield assertTrue(
+        loaded.exists(_.lastSeq == 2L),
+        loaded.exists(_.entries.size == 2),
+        loaded.exists(_.entries.exists(e => e.key == "alpha" && e.value.toByteArray.toSeq == Seq[Byte](1, 2, 3))),
+        loaded.exists(_.entries.exists(e => e.key == "beta"  && e.value.toByteArray.toSeq == Seq[Byte](42)))
+      )
+    },
+    test("a restarted engine hydrates the state machine from the on-disk snapshot") {
+      for {
+        dir   <- tempDir
+        // First engine writes some state and explicitly snapshots, then exits.
+        _     <- ZIO.scoped {
+                   makeEngineWithMachine(Some(dir)).flatMap { case (_, engine) =>
+                     engine.submit(setElement("a", Array[Byte](1))).either *>
+                       engine.submit(setElement("b", Array[Byte](2))).either *>
+                       engine.takeAndPersistSnapshot
+                   }
+                 }
+        // Second engine should pick up the snapshot during make, BEFORE it
+        // serves any reads.
+        pair  <- makeEngineWithMachine(Some(dir))
+        (sm2, _) = pair
+        a     <- sm2.get("a")
+        b     <- sm2.get("b")
+      } yield assertTrue(
+        a.exists(_.toSeq == Seq[Byte](1)),
+        b.exists(_.toSeq == Seq[Byte](2))
+      )
+    },
+    test("a restarted engine restores snapshot lastSeq for vote freshness checks") {
+      for {
+        dir   <- tempDir
+        _     <- ZIO.scoped {
+                   makeEngineWithMachine(Some(dir)).flatMap { case (_, engine) =>
+                     engine.submit(setElement("a", Array[Byte](1))).either *>
+                       engine.submit(setElement("b", Array[Byte](2))).either *>
+                       engine.takeAndPersistSnapshot
+                   }
+                 }
+        pair  <- makeEngineWithMachine(Some(dir))
+        (_, engine2) = pair
+        vote  <- engine2.handleVote("behind-candidate", term = 2L, lastSeq = 1L)
+      } yield assertTrue(
+        !vote._1,
+        vote._2 == 2L
+      )
+    },
+    test("snapshotEvery=1 triggers an automatic snapshot after one apply") {
+      for {
+        dir          <- tempDir
+        pair         <- makeEngineWithMachine(Some(dir), snapshotEvery = 1)
+        (_, engine)   = pair
+        _            <- engine.submit(setElement("auto", Array[Byte](7))).either
+        // The snapshot save is forked, so give the background fiber a moment.
+        verifier     <- StateMachineSnapshotStore.file(dir)
+        loaded       <- verifier.load.repeatUntil(_.exists(_.entries.nonEmpty)).timeout(2.seconds)
+      } yield assertTrue(
+        loaded.flatten.exists(_.entries.exists(_.key == "auto"))
+      )
+    },
+    test("snapshotEvery=0 disables automatic snapshots") {
+      for {
+        dir          <- tempDir
+        pair         <- makeEngineWithMachine(Some(dir), snapshotEvery = 0)
+        (_, engine)   = pair
+        _            <- ZIO.foreachDiscard(1 to 50)(i => engine.submit(setElement(s"k$i", Array[Byte](i.toByte))).either)
+        _            <- ZIO.sleep(100.millis)
+        verifier     <- StateMachineSnapshotStore.file(dir)
+        loaded       <- verifier.load
+      } yield assertTrue(loaded.isEmpty)
     }
   ) @@ TestAspect.withLiveClock @@ TestAspect.sequential
 }

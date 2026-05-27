@@ -48,23 +48,23 @@ async fn reads_scala_written_msgpack_value() -> Result<(), DRefError> {
     );
 
     // Decode with the same MsgPack codec Rust uses for all DRefs.
-    let aref = DRef::<Wrapper, _>::make_with_name(&ctx, CROSS_LANG_KEY, || {
-        Wrapper {
-            value: "unused".to_string(),
-        }
+    let aref = DRef::<Wrapper, _>::make_with_name(&ctx, CROSS_LANG_KEY, || Wrapper {
+        value: "unused".to_string(),
     })
     .await?;
     let value = aref.get().await?;
-    assert_eq!(value, Wrapper {
-        value: "scala-updated".to_string()
-    });
+    assert_eq!(
+        value,
+        Wrapper {
+            value: "scala-updated".to_string()
+        }
+    );
 
     // Rust can write back; Scala could read in a follow-up run.
-    aref
-        .set(Wrapper {
-            value: "rust-updated".to_string(),
-        })
-        .await?;
+    aref.set(Wrapper {
+        value: "rust-updated".to_string(),
+    })
+    .await?;
     let roundtrip = aref.get().await?;
     assert_eq!(
         roundtrip,
@@ -87,10 +87,7 @@ async fn reads_scala_written_lock_token() -> Result<(), DRefError> {
     let raw = ctx.get_element(CROSS_LANG_LOCK_KEY).await?;
     let bytes = raw.expect("expected Scala to have written lock token");
     assert_eq!(bytes.len(), 8);
-    assert_eq!(
-        lock_value_from_bytes(&bytes),
-        Some(0x1234567890abcdef_i64)
-    );
+    assert_eq!(lock_value_from_bytes(&bytes), Some(0x1234567890abcdef_i64));
 
     ctx.delete_element(CROSS_LANG_LOCK_KEY).await?;
     Ok(())

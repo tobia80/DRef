@@ -26,7 +26,9 @@ fn label() -> String {
 }
 
 fn display_name(label: &str) -> String {
-    let auto = env::var("DREF_AUTO_NAME").ok().filter(|s| !s.trim().is_empty());
+    let auto = env::var("DREF_AUTO_NAME")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
     match auto {
         Some(base) => env::var("HOSTNAME")
             .ok()
@@ -46,7 +48,9 @@ fn broadcast_schedule() -> (Duration, Duration) {
     let id = env::var("HOSTNAME")
         .or_else(|_| env::var("DREF_NODE_LABEL"))
         .unwrap_or_else(|_| "node".into());
-    let hash = id.bytes().fold(5381u64, |h, b| h.wrapping_mul(33).wrapping_add(u64::from(b)));
+    let hash = id.bytes().fold(5381u64, |h, b| {
+        h.wrapping_mul(33).wrapping_add(u64::from(b))
+    });
     (
         Duration::from_millis(hash % secs.saturating_mul(1000)),
         Duration::from_secs(secs),
@@ -91,8 +95,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .unwrap_or(8082);
 
     println!("\x1b[32m[{label}] joining on :{port} ...\x1b[0m");
-    let ctx = RaftDRefContext::start(RaftConfig { port, ..Default::default() }, Duration::from_secs(60)).await?;
-    println!("\x1b[32m[{label}] Raft ready (node_id={})\x1b[0m", ctx.node_id());
+    let ctx = RaftDRefContext::start(
+        RaftConfig {
+            port,
+            ..Default::default()
+        },
+        Duration::from_secs(60),
+    )
+    .await?;
+    println!(
+        "\x1b[32m[{label}] Raft ready (node_id={})\x1b[0m",
+        ctx.node_id()
+    );
 
     let dref = Arc::new(
         DRef::make_with_name(&ctx, SHARED_KEY, || ChatMsg {
@@ -102,21 +116,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .await?,
     );
 
-    let auto = env::var("DREF_AUTO_NAME").ok().is_some_and(|s| !s.trim().is_empty());
+    let auto = env::var("DREF_AUTO_NAME")
+        .ok()
+        .is_some_and(|s| !s.trim().is_empty());
     let name = if auto {
         display_name(&label)
     } else {
         print!("\x1b[33m[{label}] display name: \x1b[0m");
         std::io::stdout().flush().ok();
         let mut buf = String::new();
-        BufReader::new(tokio::io::stdin()).read_line(&mut buf).await?;
+        BufReader::new(tokio::io::stdin())
+            .read_line(&mut buf)
+            .await?;
         let trimmed = buf.trim();
-        if trimmed.is_empty() { label.clone() } else { trimmed.to_string() }
+        if trimmed.is_empty() {
+            label.clone()
+        } else {
+            trimmed.to_string()
+        }
     };
 
     println!(
         "\x1b[32m[{label}] {} as '{name}'\x1b[0m",
-        if auto { "auto-demo" } else { "chat (type exit to quit)" }
+        if auto {
+            "auto-demo"
+        } else {
+            "chat (type exit to quit)"
+        }
     );
 
     spawn_listener(Arc::clone(&dref), name.clone(), label.clone());

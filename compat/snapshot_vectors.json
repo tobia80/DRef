@@ -1,0 +1,33 @@
+{
+  "description": "Golden on-disk state-machine snapshot bytes (magic DRFS). Shared by StateMachineSnapshotStoreSpec (Scala) and state_machine_snapshot_store_tests (Rust). The payload is a protobuf-encoded ClusterSnapshot from proto/dref_consensus.proto.",
+  "vectors": [
+    {
+      "name": "empty_snapshot",
+      "entries": [],
+      "hex": "445246530100000000"
+    },
+    {
+      "name": "single_entry_key_a_value_01",
+      "entries": [
+        {
+          "key": "a",
+          "value_hex": "01",
+          "expire_at": null
+        }
+      ],
+      "hex": "4452465301000000080a060a0161120101"
+    },
+    {
+      "name": "single_entry_key_a_value_01_last_seq_42",
+      "entries": [
+        {
+          "key": "a",
+          "value_hex": "01",
+          "expire_at": null
+        }
+      ],
+      "last_seq": 42,
+      "hex": "44524653010000000a0a060a0161120101102a"
+    }
+  ]
+}

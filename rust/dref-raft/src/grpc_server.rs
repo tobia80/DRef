@@ -165,10 +165,7 @@ impl DRefConsensus for DRefConsensusService {
     ) -> Result<Response<HeartbeatResponse>, Status> {
         let r = request.into_inner();
         let (acknowledged, term) = self.consensus.handle_heartbeat(r.leader_id, r.term).await;
-        Ok(Response::new(HeartbeatResponse {
-            acknowledged,
-            term,
-        }))
+        Ok(Response::new(HeartbeatResponse { acknowledged, term }))
     }
 
     async fn request_vote(
