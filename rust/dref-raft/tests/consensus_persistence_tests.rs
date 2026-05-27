@@ -153,6 +153,66 @@ async fn single_node_bootstrap_persists_term_one() {
 }
 
 #[tokio::test]
+async fn pre_vote_does_not_persist_or_mutate_state() {
+    // PreVote is purely a "would you vote for me?" probe. Granting one must
+    // not bump term, set voted_for, or touch the durable store.
+    let dir = temp_dir("prevote-no-persist");
+    rm_dir(&dir);
+    let engine = make_engine(Some(dir.clone()));
+    // Single-node bootstrap leaves us as Leader at term=1, with no recent
+    // external leader heartbeat. Step down so we're a follower with no
+    // leader_id — the leader-stickiness guard should NOT kick in here.
+    engine.test_step_down_if_stale(2).await;
+
+    let (granted, term) = engine
+        .handle_pre_vote("candidate-x".to_string(), 99, 0)
+        .await;
+    assert!(granted, "fresh follower with no recent leader should grant pre-vote");
+    assert_eq!(term, 2, "voter must return its CURRENT term, not the candidate's");
+
+    // Disk must reflect what was there before the pre-vote call.
+    let store = FileVoterStateStore::open(&dir).unwrap();
+    let persisted = store.load().unwrap();
+    assert_eq!(persisted.term, 2);
+    assert!(persisted.voted_for.is_none(), "pre-vote must not record a vote");
+    rm_dir(&dir);
+}
+
+#[tokio::test]
+async fn pre_vote_refused_when_recent_leader_heartbeat() {
+    // The whole point of PreVote: a candidate cannot disrupt a leader the
+    // voter has just heard from. Simulate "I just got a heartbeat" by
+    // calling handle_heartbeat, then assert pre-vote refuses.
+    let engine = make_engine(None);
+    // Step down from single-node leader so we're a follower observing an
+    // external leader.
+    engine.test_step_down_if_stale(1).await;
+    engine.handle_heartbeat("leader-x".to_string(), 1).await;
+
+    let (granted, term) = engine
+        .handle_pre_vote("disruptor".to_string(), 50, 0)
+        .await;
+    assert!(!granted, "must refuse pre-vote while a leader is fresh");
+    assert_eq!(term, 1, "must not adopt the candidate's hypothetical term");
+}
+
+#[tokio::test]
+async fn pre_vote_refused_when_candidate_term_not_strictly_greater() {
+    let engine = make_engine(None);
+    engine.test_step_down_if_stale(5).await;
+    // Equal term: not strictly greater, must refuse.
+    let (granted, _) = engine
+        .handle_pre_vote("candidate".to_string(), 5, 0)
+        .await;
+    assert!(!granted);
+    // Lower term: must refuse.
+    let (granted, _) = engine
+        .handle_pre_vote("candidate".to_string(), 4, 0)
+        .await;
+    assert!(!granted);
+}
+
+#[tokio::test]
 async fn step_down_on_higher_observed_term() {
     let engine = make_engine(None);
     assert_eq!(engine.role().await, Role::Leader);

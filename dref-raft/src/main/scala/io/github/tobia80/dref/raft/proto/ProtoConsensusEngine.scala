@@ -94,6 +94,11 @@ final class ProtoConsensusEngine private (
 
   def leaderId: UIO[Option[String]] = stateRef.get.map(_.leaderId)
 
+  /** Current Raft term as this node sees it. Exposed for tests that assert the term does not spike across cluster
+    * events (e.g. follower restart with PreVote enabled).
+    */
+  def currentTerm: UIO[Long] = stateRef.get.map(_.term)
+
   def submit(cmd: StateCommand): IO[ConsensusError, ApplyResult] =
     for {
       termAndSeq <- stateRef
@@ -159,6 +164,38 @@ final class ProtoConsensusEngine private (
         )
         ((true, next.term), next)
     }
+
+  /** Handle a PreVote request (Ongaro thesis §9.6).
+    *
+    * PreVote is a "would-you-vote-for-me" probe a candidate runs BEFORE it actually bumps its term. The voter:
+    *   1. does NOT change its own `term` / `votedFor` — granting a PreVote is hypothetical, so there is nothing to fsync;
+    *   2. refuses if it has heard from a leader within the election timeout — that is the disruption guard PreVote
+    *      exists for, since a partitioned node that kept incrementing its term in isolation must not be able to force
+    *      a real election on rejoin;
+    *   3. otherwise grants iff `lastSeq` is at least as up-to-date as ours AND the proposed term strictly beats ours.
+    *
+    * The returned term is always our current term — the voter never adopts the candidate's hypothetical term.
+    */
+  def handlePreVote(candidateId: String, term: Long, lastSeq: Long): UIO[(Boolean, Long)] =
+    for {
+      now      <- ZIO.succeed(java.lang.System.nanoTime())
+      st       <- stateRef.get
+      response  =
+        if term <= st.term then (false, st.term)
+        else
+          // A node still in the Leader role refuses pre-votes outright — granting one would amount to volunteering
+          // its own demotion. A leader that has gone stale only learns so via the term carried back on an
+          // AppendEntries/Heartbeat response; until that signal arrives it trusts its own role. For followers, the
+          // recency check on the last heartbeat plays the equivalent role: if we've heard from a leader within the
+          // election timeout, the cluster is healthy and we shouldn't help an isolated candidate disrupt it.
+          val elapsedNanos    = now - st.lastHeartbeatNanos
+          val leaderRecent    = st.leaderId.isDefined && elapsedNanos < config.electionTimeout.toNanos
+          val isActiveLeader  = st.role == Role.Leader
+          if isActiveLeader || leaderRecent then (false, st.term)
+          else
+            val upToDate = lastSeq >= st.lastSeq
+            (upToDate, st.term)
+    } yield response
 
   def handleVote(candidateId: String, term: Long, lastSeq: Long): UIO[(Boolean, Long)] =
     updateAndPersist { st =>
@@ -292,7 +329,50 @@ final class ProtoConsensusEngine private (
       }
     }
 
+  /** Run a PreVote round. Returns `true` iff a quorum of peers indicate they would vote for us right now. Does not
+    * mutate persisted state. A peer that responds with a strictly-greater term triggers a step-down — running a real
+    * election would just lose against that higher-term holder anyway.
+    */
+  private def runPreVote: UIO[Boolean] =
+    for {
+      st            <- stateRef.get
+      currentTerm    = st.term
+      proposedTerm   = currentTerm + 1
+      lastSeq        = st.lastSeq
+      peers         <- peersRef.get
+      clusterSize    = peers.size + 1
+      needed         = clusterSize / 2 + 1
+      responses     <- ZIO.foreachPar(peers.toList) { case (peerId, client) =>
+                         client
+                           .requestPreVote(
+                             PreVoteRequest(candidateId = nodeId, term = proposedTerm, lastSeq = lastSeq)
+                           )
+                           .map(Some(_))
+                           .catchAll { _ =>
+                             ZIO.logDebug(s"pre-vote request failed for peer $peerId") *> ZIO.none
+                           }
+                       }
+      higherTerm     = responses.flatten.collect { case resp if resp.term > currentTerm => resp.term }.headOption
+      result        <- higherTerm match {
+                         case Some(newTerm) => stepDownIfStale(newTerm).as(false)
+                         case None          =>
+                           val grants = 1 + responses.flatten.count(_.granted)
+                           ZIO.succeed(grants >= needed)
+                       }
+    } yield result
+
   private def startElection: UIO[Unit] =
+    for {
+      passed                     <- runPreVote
+      _                          <- if !passed then
+                                      // Refresh the heartbeat clock so we don't immediately spin into another
+                                      // pre-vote attempt on the next tick — the guard would just reject us again.
+                                      stateRef.update(_.copy(lastHeartbeatNanos = java.lang.System.nanoTime())) *>
+                                        ZIO.logDebug(s"pre-vote failed on node $nodeId; staying follower")
+                                    else realElection
+    } yield ()
+
+  private def realElection: UIO[Unit] =
     for {
       election                   <- updateAndPersist { st =>
                                       val next = st.copy(

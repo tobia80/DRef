@@ -603,4 +603,10 @@ impl RaftDRefContext {
     pub async fn leader_id(&self) -> Option<String> {
         self.inner.consensus.leader_id().await
     }
+
+    /// Current Raft term according to this node. Exposed so tests can
+    /// assert the term remains stable across cluster events.
+    pub async fn current_term(&self) -> u64 {
+        self.inner.consensus.current_term().await
+    }
 }

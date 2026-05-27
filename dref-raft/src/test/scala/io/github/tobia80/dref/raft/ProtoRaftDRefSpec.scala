@@ -19,6 +19,17 @@ object ProtoRaftDRefSpec extends ZIOSpecDefault {
       }
       .orDie
 
+  private def deleteRecursive(path: java.nio.file.Path): Unit =
+    if java.nio.file.Files.exists(path) then {
+      if java.nio.file.Files.isDirectory(path) then {
+        val it = java.nio.file.Files.newDirectoryStream(path)
+        try it.forEach(deleteRecursive)
+        finally it.close()
+      }
+      java.nio.file.Files.deleteIfExists(path)
+      ()
+    }
+
   private def makeClusterConfig(ports: List[Int], idx: Int, nodeId: String): ProtoRaftConfig = {
     val endpoints = ports.zipWithIndex.map { case (port, i) =>
       NodeEndpoint(s"node-$i", s"127.0.0.1:$port")
@@ -34,6 +45,14 @@ object ProtoRaftDRefSpec extends ZIOSpecDefault {
       initialEndpoints = endpoints
     )
   }
+
+  private def makeClusterConfigWithStorage(
+    ports: List[Int],
+    idx: Int,
+    nodeId: String,
+    storage: java.nio.file.Path
+  ): ProtoRaftConfig =
+    makeClusterConfig(ports, idx, nodeId).copy(storageDir = Some(storage))
 
   private def startCluster(size: Int): ZIO[Scope, Throwable, List[ProtoRaftDRefContext]] =
     for {
@@ -167,6 +186,88 @@ object ProtoRaftDRefSpec extends ZIOSpecDefault {
       } yield assertTrue(
         valueWithOneLock == List(100),
         valueWithTwoLocks == List(100, 200)
+      )
+    },
+    test("restart one node, cluster stays stable, term does not spike") {
+      // PreVote regression: a follower that goes down and comes back must
+      // not force a leader change or bump the cluster's term. Without
+      // PreVote, a restarted node could race the first heartbeat, time out,
+      // increment its term, and drag the leader down to its higher term.
+      // With PreVote, the restarted node first asks peers — peers say no
+      // because they've just heard from the leader — and the cluster stays
+      // put.
+      for {
+        ports     <- ZIO.foreach(List.fill(3)(()))(_ => freePort)
+        dirs      <- ZIO
+                       .foreach((0 until 3).toList) { i =>
+                         ZIO.attemptBlocking(
+                           java.nio.file.Files.createTempDirectory(s"prevote-restart-$i-")
+                         )
+                       }
+                       .withFinalizer(ds =>
+                         ZIO.foreachDiscard(ds)(d =>
+                           ZIO.attemptBlocking(deleteRecursive(d)).orDie
+                         )
+                       )
+        // Each node owns its own restartable Scope so we can bring just one
+        // down without dropping the cluster.
+        scopes    <- ZIO.foreach((0 until 3).toList)(_ => Scope.make)
+        startNode  = (idx: Int) =>
+                       scopes(idx).extend[Any](
+                         ProtoRaftDRefContext.start(
+                           makeClusterConfigWithStorage(ports, idx, s"node-$idx", dirs(idx)),
+                           2.seconds
+                         )
+                       )
+        nodesRef  <- Ref.make[Map[Int, ProtoRaftDRefContext]](Map.empty)
+        _         <- ZIO.foreach((0 until 3).toList) { idx =>
+                       startNode(idx).flatMap(ctx => nodesRef.update(_ + (idx -> ctx)))
+                     }
+        _         <- ZIO.addFinalizer(ZIO.foreachDiscard(scopes)(_.close(Exit.unit)))
+        snapshot0 <- nodesRef.get.map(_.values.toList)
+        _         <- waitForSingleLeader(snapshot0)
+        _         <- waitForStableLeader(snapshot0)
+        beforeMap <- nodesRef.get
+        beforeNodes = beforeMap.toList.sortBy(_._1).map(_._2)
+        leaderIdBefore <- ZIO
+                            .foreach(beforeNodes)(_.leaderId)
+                            .map(_.flatten.headOption)
+                            .someOrFailException
+        leaderIdx     <- ZIO
+                           .foreach(beforeNodes.zipWithIndex) { case (n, i) =>
+                             n.isLeader.map(b => i -> b)
+                           }
+                           .map(_.collectFirst { case (i, true) => i })
+                           .someOrFailException
+        termBefore    <- beforeNodes(leaderIdx).currentTerm
+        restartIdx     = (0 until 3).find(_ != leaderIdx).get
+        // Tear down just the chosen follower by closing only its scope.
+        _             <- scopes(restartIdx).close(Exit.unit)
+        // Brief pause so the OS releases the gRPC port before we rebind.
+        _             <- ZIO.sleep(300.millis)
+        newScope      <- Scope.make
+        _             <- ZIO.addFinalizer(newScope.close(Exit.unit))
+        restarted     <- newScope.extend[Any](
+                           ProtoRaftDRefContext.start(
+                             makeClusterConfigWithStorage(ports, restartIdx, s"node-$restartIdx", dirs(restartIdx)),
+                             2.seconds
+                           )
+                         )
+        _             <- nodesRef.update(_ + (restartIdx -> restarted))
+        // Give heartbeats time to converge over more than one election
+        // timeout — under PreVote the restarted node must not drive a term
+        // bump regardless of when it gets its first heartbeat.
+        _             <- ZIO.sleep(1500.millis)
+        afterMap      <- nodesRef.get
+        afterNodes     = afterMap.toList.sortBy(_._1).map(_._2)
+        leaderIdAfter <- afterNodes(leaderIdx).leaderId.someOrFailException
+        termAfter     <- afterNodes(leaderIdx).currentTerm
+        // Every node should agree on the leader.
+        leaderIds     <- ZIO.foreach(afterNodes)(_.leaderId)
+      } yield assertTrue(
+        leaderIdAfter == leaderIdBefore,
+        termAfter == termBefore,
+        leaderIds.forall(_.contains(leaderIdBefore))
       )
     },
     test("stolen lock surfaces as LockStolenException") {

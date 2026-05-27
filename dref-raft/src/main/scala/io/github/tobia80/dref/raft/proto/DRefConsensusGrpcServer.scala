@@ -37,6 +37,14 @@ final class DRefConsensusGrpcServer(consensus: ProtoConsensusEngine) extends ZDR
       .handleVote(request.candidateId, request.term, request.lastSeq)
       .map { case (granted, term) => VoteResponse(granted, term) }
 
+  override def requestPreVote(
+    request: PreVoteRequest,
+    context: RequestContext
+  ): IO[StatusException, PreVoteResponse] =
+    consensus
+      .handlePreVote(request.candidateId, request.term, request.lastSeq)
+      .map { case (granted, term) => PreVoteResponse(granted, term) }
+
   override def installSnapshot(
     request: InstallSnapshotRequest,
     context: RequestContext

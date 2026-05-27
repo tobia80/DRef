@@ -148,6 +148,56 @@ object ProtoConsensusPersistenceSpec extends ZIOSpecDefault {
         persisted.term == 1L,
         persisted.votedFor.isEmpty
       )
+    },
+    test("handlePreVote does not persist or mutate (term, votedFor)") {
+      // PreVote is a hypothetical probe. Whether granted or refused, it
+      // must never bump term, set votedFor, or touch the durable store.
+      for {
+        dir       <- tempDir
+        engine    <- makeEngine(Some(dir))
+        // Move into Follower at term=2 via AppendEntries.
+        _         <- engine.handleAppendEntries(leaderId = "x", term = 2L, seq = 0L, command = Array.emptyByteArray)
+        result    <- engine.handlePreVote(candidateId = "candidate-x", term = 99L, lastSeq = 0L)
+        verifier  <- VoterStateStore.file(dir)
+        persisted <- verifier.load
+      } yield assertTrue(
+        result._2 == 2L,       // current term unchanged (returns CURRENT, never the candidate's hypothetical)
+        persisted.term == 2L,  // disk shows the term from AppendEntries, NOT 99
+        persisted.votedFor.isEmpty
+      )
+    },
+    test("handlePreVote refuses when a leader heartbeat is recent") {
+      for {
+        engine <- makeEngine(None)
+        _      <- engine.handleHeartbeat("leader-x", term = 1L)
+        result <- engine.handlePreVote(candidateId = "disruptor", term = 50L, lastSeq = 0L)
+      } yield assertTrue(
+        !result._1,             // refused: leader was fresh
+        result._2 == 1L         // current term unchanged
+      )
+    },
+    test("handlePreVote refuses when proposed term is not strictly greater") {
+      for {
+        engine <- makeEngine(None)
+        _      <- engine.handleAppendEntries(leaderId = "x", term = 5L, seq = 0L, command = Array.emptyByteArray)
+        equal  <- engine.handlePreVote(candidateId = "c", term = 5L, lastSeq = 0L)
+        lower  <- engine.handlePreVote(candidateId = "c", term = 4L, lastSeq = 0L)
+      } yield assertTrue(!equal._1, !lower._1)
+    },
+    test("handlePreVote refuses when this node is still the leader") {
+      // Single-node bootstrap leaves us as Leader at term=1. An active
+      // leader must refuse pre-votes — granting one would amount to
+      // volunteering its own demotion before any real signal told it to
+      // step down.
+      for {
+        engine <- makeEngine(None)
+        role0  <- engine.role
+        result <- engine.handlePreVote(candidateId = "challenger", term = 99L, lastSeq = 0L)
+      } yield assertTrue(
+        role0 == Role.Leader,
+        !result._1,
+        result._2 == 1L         // leader still believes it is term=1
+      )
     }
   ) @@ TestAspect.withLiveClock @@ TestAspect.sequential
 }

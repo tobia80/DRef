@@ -268,6 +268,120 @@ async fn distributed_lock_serializes_critical_section() -> Result<(), DRefError>
     Ok(())
 }
 
+/// PreVote regression: restarting one follower must not cause the leader's
+/// term to spike. Without PreVote, the restarted node — even when it loads
+/// a persisted (term, votedFor) — would race the leader's first heartbeat,
+/// time out, bump its term, and force the leader to step down. With
+/// PreVote, the restarted node first queries peers; the other two are
+/// hearing fresh heartbeats from the current leader and refuse the
+/// pre-vote, so the leader stays put and term doesn't move.
+#[tokio::test]
+async fn restart_one_node_cluster_stays_stable_term_does_not_spike() {
+    // Persistent storage so the restarted node remembers (term, votedFor).
+    let dirs: Vec<std::path::PathBuf> = (0..3)
+        .map(|i| {
+            let d = std::env::temp_dir().join(format!(
+                "dref-prevote-restart-{}-{i}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        })
+        .collect();
+
+    let ports: Vec<u16> = (0..3).map(|_| free_port()).collect();
+    let make_cfg = |idx: usize| {
+        let mut cfg = make_cluster_config(&ports, idx);
+        cfg.storage_dir = Some(dirs[idx].clone());
+        cfg
+    };
+
+    let mut nodes: Vec<Option<RaftDRefContext>> = Vec::with_capacity(3);
+    for i in 0..3 {
+        let ctx = RaftDRefContext::start(make_cfg(i), Duration::from_millis(50))
+            .await
+            .expect("start node");
+        nodes.push(Some(ctx));
+    }
+
+    // Wait for stable leader.
+    let mut leader_idx = None;
+    for _ in 0..60 {
+        sleep(Duration::from_millis(100)).await;
+        let mut ls = Vec::new();
+        for n in nodes.iter().flatten() {
+            ls.push(n.is_leader().await);
+        }
+        if ls.iter().filter(|x| **x).count() == 1 {
+            leader_idx = ls.iter().position(|x| *x);
+            break;
+        }
+    }
+    let leader_idx = leader_idx.expect("cluster elected a leader");
+    let leader_id_before = nodes[leader_idx]
+        .as_ref()
+        .unwrap()
+        .leader_id()
+        .await
+        .expect("leader id known");
+    let term_before = nodes[leader_idx].as_ref().unwrap().current_term().await;
+
+    // Pick any non-leader to restart.
+    let restart_idx = (0..3).find(|i| *i != leader_idx).unwrap();
+
+    // Drop the follower; Tasks::drop aborts the gRPC server and frees the
+    // port. Wait briefly so the OS releases it before rebind.
+    nodes[restart_idx] = None;
+    sleep(Duration::from_millis(200)).await;
+
+    // Bring the same node back up — same port, same node id, same storage_dir.
+    let restarted = RaftDRefContext::start(make_cfg(restart_idx), Duration::from_millis(500))
+        .await
+        .expect("restart node");
+    nodes[restart_idx] = Some(restarted);
+
+    // Give heartbeats time to converge across at least one election-timeout
+    // window. Under PreVote the restarted node should refuse to bump its
+    // term — peers tell it "we just heard from the leader, no" — so this
+    // is where a regression would surface.
+    sleep(Duration::from_millis(1500)).await;
+
+    let leader_id_after = nodes[leader_idx]
+        .as_ref()
+        .unwrap()
+        .leader_id()
+        .await
+        .expect("leader id still known");
+    let term_after = nodes[leader_idx].as_ref().unwrap().current_term().await;
+
+    assert_eq!(
+        leader_id_after, leader_id_before,
+        "leader should not change after a follower restart with PreVote"
+    );
+    assert_eq!(
+        term_after, term_before,
+        "term should not spike after a follower restart with PreVote"
+    );
+
+    // Sanity: every node agrees on the leader.
+    for (i, n) in nodes.iter().enumerate() {
+        let n = n.as_ref().unwrap();
+        let seen = n.leader_id().await;
+        assert_eq!(
+            seen.as_ref(),
+            Some(&leader_id_before),
+            "node {i} should agree on leader id"
+        );
+    }
+
+    // Cleanup.
+    drop(nodes);
+    for d in &dirs {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
 #[tokio::test]
 async fn dref_make_and_set_roundtrip() -> Result<(), DRefError> {
     let nodes = start_cluster(2).await;
