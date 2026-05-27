@@ -51,7 +51,11 @@ pub trait CommandLogStore: Send + Sync {
     fn load(&self) -> Result<CommandLogState, CommandLogError>;
     fn append(&self, seq: u64, command: &[u8]) -> Result<(), CommandLogError>;
     fn set_commit_seq(&self, commit_seq: u64) -> Result<(), CommandLogError>;
+    /// Drop every record with `seq <= through_seq` and clamp the header commit index.
     fn truncate_through(&self, through_seq: u64) -> Result<(), CommandLogError>;
+    /// Drop every record with `seq >= from_seq`. Used to roll back a failed append; the
+    /// header commit index is left alone (a failed append never advanced it).
+    fn truncate_from(&self, from_seq: u64) -> Result<(), CommandLogError>;
 }
 
 pub struct NoopCommandLogStore;
@@ -70,6 +74,10 @@ impl CommandLogStore for NoopCommandLogStore {
     }
 
     fn truncate_through(&self, _through_seq: u64) -> Result<(), CommandLogError> {
+        Ok(())
+    }
+
+    fn truncate_from(&self, _from_seq: u64) -> Result<(), CommandLogError> {
         Ok(())
     }
 }
@@ -162,6 +170,23 @@ impl CommandLogStore for FileCommandLogStore {
             .collect();
         let new_commit = state.commit_seq.min(through_seq);
         self.rewrite(new_commit, &kept)
+    }
+
+    fn truncate_from(&self, from_seq: u64) -> Result<(), CommandLogError> {
+        let path = self.target();
+        if !path.exists() {
+            return Ok(());
+        }
+        let state = {
+            let mut file = File::open(&path)?;
+            read_log(&mut file)?
+        };
+        let kept: BTreeMap<u64, Vec<u8>> = state
+            .entries
+            .into_iter()
+            .filter(|(seq, _)| *seq < from_seq)
+            .collect();
+        self.rewrite(state.commit_seq, &kept)
     }
 }
 
@@ -301,6 +326,26 @@ mod tests {
         assert_eq!(loaded.commit_seq, 1);
         assert_eq!(loaded.entries.get(&1).map(|v| v.as_slice()), Some(&[1, 2, 3][..]));
         assert_eq!(loaded.entries.get(&2).map(|v| v.as_slice()), Some(&[4][..]));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn truncate_from_drops_failed_suffix_and_keeps_commit() {
+        let dir = temp_dir("truncate-from");
+        let _ = fs::remove_dir_all(&dir);
+        let store = FileCommandLogStore::open(&dir).unwrap();
+        store.append(1, &[1]).unwrap();
+        store.append(2, &[2]).unwrap();
+        store.append(3, &[3]).unwrap();
+        store.set_commit_seq(2).unwrap();
+        // Roll back the failed append at seq=3.
+        store.truncate_from(3).unwrap();
+        let loaded = store.load().unwrap();
+        // commit index is untouched by a rollback.
+        assert_eq!(loaded.commit_seq, 2);
+        assert!(loaded.entries.contains_key(&1));
+        assert!(loaded.entries.contains_key(&2));
+        assert!(!loaded.entries.contains_key(&3));
         let _ = fs::remove_dir_all(&dir);
     }
 
