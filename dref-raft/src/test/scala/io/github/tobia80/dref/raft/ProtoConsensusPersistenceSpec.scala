@@ -316,6 +316,38 @@ object ProtoConsensusPersistenceSpec extends ZIOSpecDefault {
         verifier     <- StateMachineSnapshotStore.file(dir)
         loaded       <- verifier.load
       } yield assertTrue(loaded.isEmpty)
+    },
+    test("promotion discards the uncommitted tail so lastSeq matches the committed tip") {
+      // Regression: a node elected leader while holding an uncommitted tail
+      // (lastSeq > lastApplied) must drop it so its next assigned seq lines up
+      // with what followers — reset to lastApplied by the post-election
+      // snapshot — expect. Otherwise every AppendEntries is rejected for a
+      // permanent gap and replication livelocks.
+      for {
+        engine <- makeEngine(None)
+        // Accept entries 1 and 2 from a remote leader; only entry 1 is
+        // committed (commitSeq advances to 1), leaving entry 2 uncommitted.
+        _      <- engine.handleAppendEntries(leaderId = "L", term = 2L, seq = 1L, command = setElement("a", Array[Byte](1)).toByteArray, commitSeq = 0L)
+        _      <- engine.handleAppendEntries(leaderId = "L", term = 2L, seq = 2L, command = setElement("b", Array[Byte](2)).toByteArray, commitSeq = 1L)
+        before <- engine.stateForTest
+        _      <- engine.discardUncommittedTail
+        after  <- engine.stateForTest
+      } yield assertTrue(
+        before._1 == 2L,          // lastSeq advanced past the committed tip
+        before._2 == 1L,          // lastApplied is the committed tip
+        before._3 == 1,           // entry 2 still pending
+        after._1 == 1L,           // lastSeq reset to the committed tip
+        after._2 == 1L,           // lastApplied untouched
+        after._3 == 0             // uncommitted pending cleared
+      )
+    },
+    test("promotion leaves a fully-committed log untouched") {
+      for {
+        engine <- makeEngine(None)
+        _      <- engine.handleAppendEntries(leaderId = "L", term = 2L, seq = 1L, command = setElement("a", Array[Byte](1)).toByteArray, commitSeq = 1L)
+        _      <- engine.discardUncommittedTail
+        after  <- engine.stateForTest
+      } yield assertTrue(after._1 == 1L, after._2 == 1L, after._3 == 0)
     }
   ) @@ TestAspect.withLiveClock @@ TestAspect.sequential
 }

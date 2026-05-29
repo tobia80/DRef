@@ -1212,6 +1212,7 @@ impl Consensus {
                 st.leader_id = Some(self.node_id.clone());
                 info!(node = %self.node_id, term, "elected leader");
                 drop(st);
+                self.discard_uncommitted_tail().await;
                 // New leader ships a snapshot to bring followers in sync.
                 self.broadcast_snapshot().await;
             }
@@ -1220,6 +1221,30 @@ impl Consensus {
             // Stay candidate; next tick may try again, or a higher-term
             // leader will demote us via heartbeat.
         }
+    }
+
+    /// Drop the uncommitted tail of the log when stepping up to leader.
+    ///
+    /// A node can win an election while it still holds entries the previous
+    /// leader replicated but never committed (`seq > last_applied`, sitting in
+    /// `pending`). The new leader brings followers in sync by shipping a
+    /// snapshot taken at `last_applied`, which resets each follower's
+    /// `last_seq` to the committed tip. If we kept our inflated `last_seq`, the
+    /// next write would be assigned a seq past what followers expect, every
+    /// AppendEntries would be rejected for the gap, and replication would
+    /// livelock. Those entries were never acked to a client, so dropping them
+    /// is safe; new writes resume from the committed tip.
+    async fn discard_uncommitted_tail(&self) {
+        let discard_from = {
+            let mut st = self.state.write().await;
+            let discard_from = st.last_applied + 1;
+            st.last_seq = st.last_applied;
+            discard_from
+        };
+        self.pending.write().await.retain(|seq, _| *seq < discard_from);
+        let _ = self
+            .with_command_log(|log| log.truncate_from(discard_from))
+            .await;
     }
 
     /// Send the current state machine snapshot to every peer. Called when
@@ -1253,5 +1278,72 @@ pub async fn wait_for_leader(c: &Consensus, max: Duration) -> Option<String> {
             return None;
         }
         sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state_machine::StateMachine;
+
+    async fn test_consensus() -> Consensus {
+        // No peers + no persisted state: the node boots as a single-node
+        // leader, which is irrelevant here — we drive the state directly.
+        Consensus::new(
+            "node-test".to_string(),
+            StateMachine::new(),
+            RaftConfig::default(),
+        )
+        .await
+    }
+
+    /// Regression: a node elected leader while holding an uncommitted tail
+    /// (`last_seq > last_applied`) must drop that tail so its next assigned
+    /// seq lines up with what followers — reset to `last_applied` by the
+    /// post-election snapshot — expect. Otherwise every AppendEntries is
+    /// rejected for a permanent gap and replication livelocks.
+    #[tokio::test]
+    async fn discard_uncommitted_tail_resets_last_seq_and_clears_pending() {
+        let c = test_consensus().await;
+        // Accepted entries 1..=5 from a prior leader; only 1..=2 committed.
+        {
+            let mut st = c.state.write().await;
+            st.last_applied = 2;
+            st.commit_seq = 2;
+            st.last_seq = 5;
+        }
+        {
+            let mut pending = c.pending.write().await;
+            pending.insert(3, vec![3]);
+            pending.insert(4, vec![4]);
+            pending.insert(5, vec![5]);
+        }
+
+        c.discard_uncommitted_tail().await;
+
+        let st = c.state.read().await;
+        assert_eq!(st.last_seq, 2, "last_seq must drop to the committed tip");
+        assert_eq!(st.last_applied, 2);
+        assert!(
+            c.pending.read().await.is_empty(),
+            "uncommitted pending entries must be cleared on promotion"
+        );
+    }
+
+    /// A fully-committed log has no uncommitted tail, so promotion leaves
+    /// `last_seq` untouched.
+    #[tokio::test]
+    async fn discard_uncommitted_tail_is_noop_when_fully_committed() {
+        let c = test_consensus().await;
+        {
+            let mut st = c.state.write().await;
+            st.last_applied = 4;
+            st.commit_seq = 4;
+            st.last_seq = 4;
+        }
+
+        c.discard_uncommitted_tail().await;
+
+        assert_eq!(c.state.read().await.last_seq, 4);
     }
 }
