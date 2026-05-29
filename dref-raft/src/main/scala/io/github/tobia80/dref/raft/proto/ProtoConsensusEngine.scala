@@ -597,17 +597,44 @@ final class ProtoConsensusEngine private (
                                           stateRef
                                             .modify { st =>
                                               if st.role == Role.Candidate && st.term == term then
-                                                val next = st.copy(role = Role.Leader, leaderId = Some(nodeId))
-                                                (true, next)
+                                                (true, st.copy(role = Role.Leader, leaderId = Some(nodeId)))
                                               else (false, st)
                                             }
                                             .flatMap { elected =>
-                                              ZIO.logInfo(s"node $nodeId elected leader term $term").when(elected) *>
-                                                broadcastSnapshot.when(elected)
+                                              ZIO
+                                                .when(elected) {
+                                                  ZIO.logInfo(s"node $nodeId elected leader term $term") *>
+                                                    discardUncommittedTail *>
+                                                    broadcastSnapshot
+                                                }
+                                                .unit
                                             }
                                         else ZIO.logInfo(s"node $nodeId lost election term $term votes $votes")
                                     }
     } yield ()
+
+  /** Drop the uncommitted tail of the log when stepping up to leader.
+    *
+    * A node can win an election while it still holds entries the previous leader replicated but never committed
+    * (`seq > lastApplied`, sitting in `pending`). The new leader brings followers in sync by shipping a snapshot taken
+    * at `lastApplied`, which resets each follower's `lastSeq` to the committed tip. If we kept our inflated `lastSeq`,
+    * the next write would be assigned a seq past what followers expect, every AppendEntries would be rejected for the
+    * gap, and replication would livelock. Those entries were never acked to a client, so dropping them is safe; new
+    * writes resume from the committed tip.
+    */
+  private[raft] def discardUncommittedTail: UIO[Unit] =
+    for {
+      discardFrom <- stateRef.modify(st => (st.lastApplied + 1L, st.copy(lastSeq = st.lastApplied)))
+      _           <- pendingRef.update(_.filter { case (seq, _) => seq < discardFrom })
+      _           <- withCommandLog(_.truncateFrom(discardFrom))
+    } yield ()
+
+  /** Test-only read of `(lastSeq, lastApplied, pendingSize)` for asserting log-reconciliation invariants. */
+  private[raft] def stateForTest: UIO[(Long, Long, Int)] =
+    for {
+      st      <- stateRef.get
+      pending <- pendingRef.get
+    } yield (st.lastSeq, st.lastApplied, pending.size)
 
   private def broadcastSnapshot: UIO[Unit] =
     for {
